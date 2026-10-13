@@ -2,6 +2,7 @@ import h5py
 import warnings
 import numpy as np
 from pathlib import Path
+import mne 
 
 def stim_times(h5_path, voice=None, confirmed_only=True):
     """
@@ -30,3 +31,23 @@ def stim_times(h5_path, voice=None, confirmed_only=True):
         if voice is not None:
             keep &= stim["voice"][:] == voice.encode() #the file stores voices as bytes (b"A")
     return times[keep]
+
+def make_epochs(raw, tmin=-0.002, tmax= 0.025, event= "stim", baseline=None):
+    """
+    Cuts a short window of signal around every event, e.g. every stim pulse
+    Input:
+    raw: MNE Raw from to_mne (its pulses are annotations called "stim")
+    tmin, tmax: window around each event, in seconds (default -2 ms to +25 ms, the lab's ERNA window)
+    event: which annotation to cut around (default "stim")
+    baseline: MNE baseline window to subtract, e.g. (-0.2, 0); None (default) subtracts nothing, which ERNA needs
+        since only 2 ms come before the stim artifact
+    Returns: MNE Epochs, one slice per event (epochs x channels x samples)
+    """
+    n_events = sum(d == event for d in raw.annotations.description)
+    if n_events == 0: #MNE's own error here is hard to read
+        raise ValueError(f'no "{event}" annotations in this Raw, nothing to epoch (no pulses in the window?)')
+    events, event_id = mne.events_from_annotations(raw, event_id={event:1})
+    epochs = mne.Epochs(raw, events, event_id, tmin=tmin, tmax=tmax, baseline=baseline, preload=True)
+    if len(epochs) < n_events: #MNE drops events whose window runs past the start or end of the Raw
+        warnings.warn(f"{n_events - len(epochs)} of {n_events} {event} events were too close to the edge of the Raw and were dropped")
+    return epochs

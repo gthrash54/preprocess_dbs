@@ -35,3 +35,27 @@ def test_dropping_unconfirmed_pulses_warns(tmp_path):
     _fake_stim(path)
     with pytest.warns(UserWarning, match="1 of 4"):
         stim_times(path)
+
+
+def _raw_with_events(onsets, desc="stim", seconds=1.0):
+    import mne
+    raw = mne.io.RawArray(np.zeros((2, int(1000 * seconds))), mne.create_info(["lead1_c2", "lead1_c3"], 1000.0, "dbs"), verbose=False)
+    raw.set_annotations(mne.Annotations(onsets, 0, desc))
+    return raw
+
+
+def test_epochs_window_and_event_choice():
+    from preprocess_dbs.epoch import make_epochs
+    raw = _raw_with_events([0.2, 0.5], ["stim", "cue"])
+    ep = make_epochs(raw) #only the "stim" one
+    assert len(ep) == 1 and ep.get_data().shape == (1, 2, 28) #-2 to +25 ms at 1000 Hz = 28 samples
+    assert len(make_epochs(raw, event="cue", tmin=-0.1, tmax=0.1)) == 1
+
+
+def test_no_events_and_edge_drops():
+    from preprocess_dbs.epoch import make_epochs
+    with pytest.raises(ValueError, match="no \"stim\""):
+        make_epochs(_raw_with_events([0.5], "cue"))
+    with pytest.warns(UserWarning, match="1 of 2"):
+        ep = make_epochs(_raw_with_events([0.5, 0.99])) #0.99 s + 25 ms runs past the end
+    assert len(ep) == 1
