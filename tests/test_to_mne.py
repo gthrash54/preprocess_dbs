@@ -52,3 +52,22 @@ def test_window_outside_the_recording(tmp_path):
     _fake_cleaned(path) #3 s long
     with pytest.raises(ValueError, match="outside"):
         to_mne(path, "ecos", 2, 5)
+
+
+def test_pulses_become_annotations(tmp_path):
+    path = tmp_path / "block.h5"
+    _fake_cleaned(path) #3 s at 1000 Hz
+    with h5py.File(path, "a") as f:
+        s = f.create_group("stim")
+        s.create_dataset("time", data=np.array([0.5, 1.25, 1.5, 2.5]))
+        s.create_dataset("voice", data=np.array(["A"] * 4, dtype="S"))
+        s.create_dataset("confirmed", data=np.ones(4, dtype=np.int8))
+    raw = to_mne(path, "ecos", 1, 2)
+    assert np.allclose(raw.annotations.onset, [0.25, 0.5]) #only the pulses inside 1-2 s, measured from the window start
+    assert set(raw.annotations.description) == {"stim"}
+
+
+def test_no_stim_table_still_loads(tmp_path):
+    path = tmp_path / "block.h5"
+    _fake_cleaned(path) #has no stim table
+    assert len(to_mne(path, "ecos", 0, 1).annotations) == 0

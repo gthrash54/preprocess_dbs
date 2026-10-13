@@ -1,14 +1,18 @@
 import h5py
+import numpy as np
 import mne 
 from pathlib import Path
-def to_mne(h5_path, stream, t1, t2):
+from preprocess_dbs.epoch import stim_times
+def to_mne(h5_path, stream, t1, t2, voice=None, confirmed_only=True):
     """
     Input:
     h5_path: a cleaned raw h5 file, ie from clean_dbs
     stream: which signal group to load eg. ecos (ecog and DBS lead contacts)
     t1, t2: start and end of the window, in seconds from the start of the recording
+    voice, confirmed_only: which stim pulses to mark, passed on to stim_times (see epoch.py)
     Returns: MNE RAW array of specified window (volts). Lead contacts are renamed lead<N>_c<contact> (e.g. lead1_c2) whatever
-    the rig called them, and channels are typed ecog, dbs, emg or misc
+    the rig called them, and channels are typed ecog, dbs, emg or misc. Every stim pulse inside the window is an
+    annotation called "stim" (no annotations if the file has no stim table)
     """
 
     if not Path(h5_path).is_file():
@@ -31,6 +35,14 @@ def to_mne(h5_path, stream, t1, t2):
     types = [channel_type(n, grp) for n, grp in zip(names, groups)]
     info = mne.create_info(names, fs, types)
     raw = mne.io.RawArray(data, info)
+    try:
+        times = stim_times(h5_path, voice, confirmed_only)
+    except KeyError: #no stim table (old file): the signal is still fine, just no pulses to mark
+        times = np.array([])
+    t0 = start + i0 / fs #exact time of the Raw's first sample (t1 rounded down to a whole sample)
+    inside = (times >= t0) & (times < t0 + data.shape[1] / fs)
+    onsets = times[inside] - t0
+    raw.set_annotations(mne.Annotations(onset = onsets, duration = 0, description = "stim"))
     return raw
 
 
