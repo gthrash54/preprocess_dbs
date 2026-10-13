@@ -45,3 +45,10 @@ def test_brainvision_names_become_standard(tmp_path):
     raw = to_mne(path, "lead", 0, 0.1)
     assert raw.ch_names == ["lead1_c1", "lead1_c2", "FDI_contra"]
     assert raw.get_channel_types() == ["dbs", "dbs", "emg"]
+
+
+def test_window_outside_the_recording(tmp_path):
+    path = tmp_path / "block.h5"
+    _fake_cleaned(path) #3 s long
+    with pytest.raises(ValueError, match="outside"):
+        to_mne(path, "ecos", 2, 5)

@@ -20,8 +20,12 @@ def to_mne(h5_path, stream, t1, t2):
         #what each channel is (lead1/lead2/ecog_anterior/emg... and contact number), filled in per rig by clean_dbs
         groups = [x.decode() for x in g["channel_group"][:]] if "channel_group" in g else [""] * len(names)
         contacts = [x.decode() for x in g["channel_contact"][:]] if "channel_contact" in g else [""] * len(names)
-        i0 = int(t1 * fs) # time x fs = samples
-        i1 = int(t2 *fs)
+        start = g.attrs.get("start_time", 0.0) #seconds into the recording of this stream's first sample (usually 0)
+        n = g["data"].shape[1]
+        i0 = int((t1 - start) * fs) # time x fs = samples
+        i1 = int((t2 - start) * fs)
+        if not 0 <= i0 < i1 <= n:
+            raise ValueError(f"window {t1}-{t2} s is outside this stream ({start:.3f}-{start + n / fs:.3f} s)")
         data = g["data"][:,i0:i1] # all data between set times
     names = [standard_name(n, grp, c) for n, grp, c in zip(names, groups, contacts)]
     types = [channel_type(n, grp) for n, grp in zip(names, groups)]
