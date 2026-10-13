@@ -1,0 +1,43 @@
+# never commit recordings or derived data (patient data, large files)
+*.h5
+*.mat
+*.tev
+*.tsq
+*.tin
+*.Tbk
+*.Tdx
+*.eeg
+*.vhdr
+*.vmrk
+*.avi
+data/
+output/
+
+# python / notebooks
+__pycache__/
+*.pyc
+.venv/
+.ipynb_checkpoints/
+*.egg-info/
+
+# manifests, reports and logs list patient IDs and local paths
+manifest*.csv
+clean_report*.csv
+_reports/
+logs/
+
+# latex helper files (docs/build.sh cleans these up anyway)
+*.aux
+*.log
+*.fls
+*.fdb_latexmk
+*.out
+*.toc
+*.synctex.gz
+*.listing
+
+# claude code working copies (agent worktrees), never commit
+.claude/
+
+# personal editor settings
+.vscode/

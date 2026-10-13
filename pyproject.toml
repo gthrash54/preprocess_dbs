@@ -1,0 +1,17 @@
+#lets the toolbox be installed with "uv pip install -e ." so "import preprocess_dbs" works from any folder, script, or MATLAB
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "preprocess_dbs"
+version = "0.1.0"
+description = "Walker lab toolbox for preprocessing cleaned intraoperative DBS recordings (LFP and ERNA)"
+requires-python = ">=3.10"
+dependencies = ["numpy", "scipy", "h5py", "pandas", "mne", "pyyaml"]
+
+[project.optional-dependencies]
+dev = ["pytest"] #only needed to run the tests
+
+[tool.setuptools]
+packages = ["preprocess_dbs"]
