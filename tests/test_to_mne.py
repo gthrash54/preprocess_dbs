@@ -29,3 +29,19 @@ def test_window_names_and_types(tmp_path):
 def test_missing_file_says_so(tmp_path):
     with pytest.raises(FileNotFoundError):
         to_mne(tmp_path / "nope.h5", "ecos", 0, 1)
+
+
+def test_brainvision_names_become_standard(tmp_path):
+    #a BrainVision file calls the contacts DBS1..; the cleaned file's group/contact say they're lead 1, so they come out lead1_c1..
+    path = tmp_path / "bv.h5"
+    names = ["DBS1", "DBS2", "FDI_contra"]
+    with h5py.File(path, "w") as f:
+        g = f.create_group("streams").create_group("lead")
+        g.create_dataset("data", data=np.zeros((3, 100), dtype=np.float32))
+        g.create_dataset("channel_names", data=np.array(names, dtype="S"))
+        g.create_dataset("channel_group", data=np.array(["lead1", "lead1", "emg"], dtype="S"))
+        g.create_dataset("channel_contact", data=np.array(["1", "2", ""], dtype="S"))
+        g.attrs["fs"] = 1000.0
+    raw = to_mne(path, "lead", 0, 0.1)
+    assert raw.ch_names == ["lead1_c1", "lead1_c2", "FDI_contra"]
+    assert raw.get_channel_types() == ["dbs", "dbs", "emg"]
