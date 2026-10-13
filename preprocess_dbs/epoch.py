@@ -51,3 +51,29 @@ def make_epochs(raw, tmin=-0.002, tmax= 0.025, event= "stim", baseline=None):
     if len(epochs) < n_events: #MNE drops events whose window runs past the start or end of the Raw
         warnings.warn(f"{n_events - len(epochs)} of {n_events} {event} events were too close to the edge of the Raw and were dropped")
     return epochs
+
+def select_pulses(raw, gap_before=0.05, gap_after=0.0, event="stim"):
+    """
+    Keeps only the pulses with enough quiet time around them, so other pulses' artifacts don't land in their epochs
+    Input:
+    raw: MNE Raw with pulses as annotations (from to_mne)
+    gap_before: seconds with no other pulse before a pulse (default 50 ms: keeps the first pulse of each pair, burst or train)
+    gap_after: seconds with no other pulse after it (default 0: no rule). Set it to the epoch length (e.g. 0.025) for single
+        pulses whose whole epoch is clean
+    event: which annotation the pulses are (default "stim")
+    Returns: a copy of the Raw with only the kept pulses; other annotations are left as they are
+    """
+    ann = raw.annotations
+    is_event = ann.description == event
+    times = ann.onset[is_event]
+    before = np.diff(times, prepend=-np.inf) #gap to the previous pulse (the first pulse has none: infinity)
+    after = np.diff(times, append=np.inf) #gap to the next pulse
+    keep = (before >= gap_before) & (after >= gap_after)
+    if len(times) and not keep.any():
+        warnings.warn(f"none of the {len(times)} {event} pulses have {gap_before * 1000:g} ms quiet before and "
+                      f"{gap_after * 1000:g} ms after")
+    drop = np.flatnonzero(is_event)[~keep] #positions in the annotation list of the pulses that didn't pass
+    out = raw.copy()
+    out.set_annotations(ann.copy())
+    out.annotations.delete(drop)
+    return out

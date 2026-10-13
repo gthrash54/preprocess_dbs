@@ -59,3 +59,14 @@ def test_no_events_and_edge_drops():
     with pytest.warns(UserWarning, match="1 of 2"):
         ep = make_epochs(_raw_with_events([0.5, 0.99])) #0.99 s + 25 ms runs past the end
     assert len(ep) == 1
+
+
+def test_select_pulses_by_gaps():
+    from preprocess_dbs.epoch import select_pulses
+    #a pair (0.100, 0.103), a single pulse (0.300) and a cue that must be left alone
+    raw = _raw_with_events([0.1, 0.103, 0.3, 0.5], ["stim", "stim", "stim", "cue"])
+    first = select_pulses(raw) #first of each group
+    assert list(first.annotations.onset) == [0.1, 0.3, 0.5]
+    single = select_pulses(raw, gap_after=0.025) #whole epoch clean: only the lone pulse
+    assert [o for o, d in zip(single.annotations.onset, single.annotations.description) if d == "stim"] == [0.3]
+    assert len(raw.annotations) == 4 #original untouched
