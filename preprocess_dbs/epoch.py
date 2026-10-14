@@ -78,3 +78,28 @@ def select_pulses(raw, gap_before=0.05, gap_after=0.0, event="stim"):
     out.set_annotations(ann.copy())
     out.annotations.delete(drop)
     return out
+
+def classify_pulses(counts,periods):
+    """
+    Gives each pulse its condition label from the stim table: single, or paired with its gap
+    Input:
+    counts: the stim table's "count" column, how many pulses are in the group each pulse belongs to
+        (1 = single, 2 = paired, 10 = burst). Both pulses of a pair say 2
+    periods: the stim table's "period_ms" column, the gap in ms the stimulator puts between pulses of a group.
+        For a pair this is its interpulse interval. The lab's code instead measures the gap between pulse times,
+        subtracts 0.1 ms and looks it up in a table of 10 gaps. Reading the stimulator's setting works for any gap
+    Returns: a list of labels, one per pulse in the same order as the stim table: "single", "paired_<gap in ms>"
+        (e.g. "paired_2.89"), or "" for pulses not labeled yet (bursts)
+    """
+    labels = [""] *len(counts)
+    m = 0
+    while m < len(counts):
+        if counts[m] == 1:
+            labels[m] = "single" 
+            m += 1 
+        elif counts[m] == 2:
+            labels[m] = f"paired_{periods[m]:.2f}"
+            m += 1
+        else:
+            m += 1
+    return labels

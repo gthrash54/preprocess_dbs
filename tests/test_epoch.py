@@ -70,3 +70,20 @@ def test_select_pulses_by_gaps():
     single = select_pulses(raw, gap_after=0.025) #whole epoch clean: only the lone pulse
     assert [o for o, d in zip(single.annotations.onset, single.annotations.description) if d == "stim"] == [0.3]
     assert len(raw.annotations) == 4 #original untouched
+
+
+def test_classify_pulses():
+    from preprocess_dbs.epoch import classify_pulses
+    #the first 10 rows of uh3021 increment1_depth1: two pairs, a single, two pairs, then a burst starts
+    counts = np.array([2, 2, 2, 2, 1, 2, 2, 2, 2, 10])
+    periods = np.array([2.88767982, 2.88767982, 5.77535963, 5.77535963, 49.99167633,
+                        7.67999935, 7.67999935, 6.73791981, 6.73791981, 7.67999935])
+    assert classify_pulses(counts, periods) == ["paired_2.89", "paired_2.89", "paired_5.78", "paired_5.78", "single",
+                                                "paired_7.68", "paired_7.68", "paired_6.74", "paired_6.74", ""]
+
+
+def test_classify_pulses_edges():
+    from preprocess_dbs.epoch import classify_pulses
+    assert classify_pulses(np.array([]), np.array([])) == [] #no pulses
+    assert classify_pulses(np.array([1, 1]), np.array([50.0, 50.0])) == ["single", "single"] #back-to-back singles both labeled
+    assert classify_pulses(np.array([5, 5, 1]), np.array([4.0, 4.0, 50.0])) == ["", "", "single"] #unknown counts skipped, no hang
