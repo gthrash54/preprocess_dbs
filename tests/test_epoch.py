@@ -78,8 +78,8 @@ def test_classify_pulses():
     counts = np.array([2, 2, 2, 2, 1, 2, 2, 2, 2] + [10] * 10)
     periods = np.array([2.88767982, 2.88767982, 5.77535963, 5.77535963, 49.99167633,
                         7.67999935, 7.67999935, 6.73791981, 6.73791981] + [7.67999935] * 10)
-    assert classify_pulses(counts, periods) == ["paired_2.89", "paired_2.89", "paired_5.78", "paired_5.78", "single",
-                                                "paired_7.68", "paired_7.68", "paired_6.74", "paired_6.74"] + \
+    assert classify_pulses(counts, periods) == ["paired_2.89_1", "paired_2.89_2", "paired_5.78_1", "paired_5.78_2", "single",
+                                                "paired_7.68_1", "paired_7.68_2", "paired_6.74_1", "paired_6.74_2"] + \
                                                [f"burst_{k}" for k in range(1, 11)]
 
 
@@ -100,3 +100,11 @@ def test_classify_bursts_and_probes():
     assert classify_pulses(np.array([10] * 20), np.array(burst + burst)) == [f"burst_{k}" for k in range(1, 11)] * 2
     #burst + probes cut off by the end of the table: labeled as far as it goes
     assert classify_pulses(np.array([10] * 15), np.array(burst + probes[:5])) == [f"burstprobes_{k}" for k in range(1, 16)]
+
+
+def test_classify_pair_positions():
+    from preprocess_dbs.epoch import classify_pulses
+    #two pairs with the same gap back to back (3 times in uh3021): positions show where one pair ends
+    assert classify_pulses(np.array([2, 2, 2, 2]), np.array([1.925] * 4)) == ["paired_1.93_1", "paired_1.93_2"] * 2
+    #a pair cut off by the end of the table: labeled as far as it goes, no crash
+    assert classify_pulses(np.array([1, 2]), np.array([50.0, 2.888])) == ["single", "paired_2.89_1"]
