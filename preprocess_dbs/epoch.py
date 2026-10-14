@@ -81,15 +81,23 @@ def select_pulses(raw, gap_before=0.05, gap_after=0.0, event="stim"):
 
 def classify_pulses(counts,periods):
     """
-    Gives each pulse its condition label from the stim table: single, or paired with its gap
+    Gives each pulse its condition label from the stim table: single, paired with its gap, or its position in a burst
     Input:
     counts: the stim table's "count" column, how many pulses are in the group each pulse belongs to
-        (1 = single, 2 = paired, 10 = burst). Both pulses of a pair say 2
+        (1 = single, 2 = paired, 10 = burst). Both pulses of a pair say 2, and the 10 probes after a burst also say 10
     periods: the stim table's "period_ms" column, the gap in ms the stimulator puts between pulses of a group.
-        For a pair this is its interpulse interval. The lab's code instead measures the gap between pulse times,
-        subtracts 0.1 ms and looks it up in a table of 10 gaps. Reading the stimulator's setting works for any gap
+        For a pair this is its interpulse interval
     Returns: a list of labels, one per pulse in the same order as the stim table: "single", "paired_<gap in ms>"
-        (e.g. "paired_2.89"), or "" for pulses not labeled yet (bursts)
+        (e.g. "paired_2.89"), "burst_1" to "burst_10", "burstprobes_1" to "burstprobes_20" (a burst, then 10 slower
+        probes), or "" for a count it doesn't know
+    Not the same as the lab's MATLAB code (parse.m), so its labels won't line up one to one with the lab's output:
+        - pairs are named by the stimulator's own gap ("paired_0.45"), not by the lab's lookup names (pp1, pp5 ... pp23),
+          which come from the measured gap minus 0.1 ms. Any gap works, with no lookup table and no "CHECK"
+        - every pulse gets a label. The lab's loop stops one short and never labels the last pulse of each segment
+        - unknown counts stay "" and a burst cut off by the end of the table is labeled as far as it goes,
+          where the lab's loop hangs
+        - burst + probes also needs the next 10 pulses at a different rate, not just count 10, so two bursts in a row
+          aren't mistaken for one burst + probes
     """
     labels = [""] *len(counts)
     m = 0
@@ -100,6 +108,15 @@ def classify_pulses(counts,periods):
         elif counts[m] == 2:
             labels[m] = f"paired_{periods[m]:.2f}"
             m += 1
+        elif counts[m] == 10:
+            if m+10 < len(counts) and counts[m+10] == 10 and periods[m+10] != periods[m]:
+                for k in range(min(20,len(counts) - m)):
+                    labels[m+k] = f"burstprobes_{k+1}"
+                m += 20
+            else:
+                for k in range(min(10, len(counts) - m)): #a burst cut off by the end of the table: label only the pulses that are there
+                    labels[m+k] = f"burst_{k+1}"
+                m += 10
         else:
             m += 1
     return labels

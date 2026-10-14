@@ -74,12 +74,13 @@ def test_select_pulses_by_gaps():
 
 def test_classify_pulses():
     from preprocess_dbs.epoch import classify_pulses
-    #the first 10 rows of uh3021 increment1_depth1: two pairs, a single, two pairs, then a burst starts
-    counts = np.array([2, 2, 2, 2, 1, 2, 2, 2, 2, 10])
+    #the first 19 rows of uh3021 increment1_depth1: two pairs, a single, two pairs, then a 10-pulse burst
+    counts = np.array([2, 2, 2, 2, 1, 2, 2, 2, 2] + [10] * 10)
     periods = np.array([2.88767982, 2.88767982, 5.77535963, 5.77535963, 49.99167633,
-                        7.67999935, 7.67999935, 6.73791981, 6.73791981, 7.67999935])
+                        7.67999935, 7.67999935, 6.73791981, 6.73791981] + [7.67999935] * 10)
     assert classify_pulses(counts, periods) == ["paired_2.89", "paired_2.89", "paired_5.78", "paired_5.78", "single",
-                                                "paired_7.68", "paired_7.68", "paired_6.74", "paired_6.74", ""]
+                                                "paired_7.68", "paired_7.68", "paired_6.74", "paired_6.74"] + \
+                                               [f"burst_{k}" for k in range(1, 11)]
 
 
 def test_classify_pulses_edges():
@@ -87,3 +88,15 @@ def test_classify_pulses_edges():
     assert classify_pulses(np.array([]), np.array([])) == [] #no pulses
     assert classify_pulses(np.array([1, 1]), np.array([50.0, 50.0])) == ["single", "single"] #back-to-back singles both labeled
     assert classify_pulses(np.array([5, 5, 1]), np.array([4.0, 4.0, 50.0])) == ["", "", "single"] #unknown counts skipped, no hang
+    assert classify_pulses(np.array([1, 10, 10, 10]), np.array([50.0, 7.68, 7.68, 7.68])) == \
+        ["single", "burst_1", "burst_2", "burst_3"] #a burst cut off by the end of the table, no crash
+
+
+def test_classify_bursts_and_probes():
+    from preprocess_dbs.epoch import classify_pulses
+    burst, probes = [7.67999935] * 10, [23.06047821] * 10 #uh3021's burst and probe periods
+    assert classify_pulses(np.array([10] * 20), np.array(burst + probes)) == [f"burstprobes_{k}" for k in range(1, 21)]
+    #two bursts in a row have the same rate, so they stay two bursts (the lab's count-only rule would call them burst + probes)
+    assert classify_pulses(np.array([10] * 20), np.array(burst + burst)) == [f"burst_{k}" for k in range(1, 11)] * 2
+    #burst + probes cut off by the end of the table: labeled as far as it goes
+    assert classify_pulses(np.array([10] * 15), np.array(burst + probes[:5])) == [f"burstprobes_{k}" for k in range(1, 16)]
