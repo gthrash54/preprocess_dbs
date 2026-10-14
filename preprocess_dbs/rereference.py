@@ -1,8 +1,9 @@
 import mne
 import warnings
 
-#the lab's ERNA pairs for an 8-contact directional lead: contacts 2-4 are the lower segments, 5-7 the upper ones
-PAIRS = [(2, 3), (3, 4), (4, 2), (5, 6), (6, 7), (7, 5)]
+#the lab's ERNA pairs for an 8-contact directional lead: contacts 2-4 are the lower segments, 5-7 the upper ones.
+#Order matters, the first contact minus the second: the lab's dbs_3_2 is c3 - c2 (checked against its saved uh3021 averages)
+PAIRS = [(3, 2), (4, 3), (2, 4), (6, 5), (7, 6), (5, 7)]
 
 def bipolar_names(lead, pairs=PAIRS):
     """

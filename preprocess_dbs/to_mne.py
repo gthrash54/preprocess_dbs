@@ -1,4 +1,5 @@
 import h5py
+import warnings
 import numpy as np
 import mne 
 from pathlib import Path
@@ -20,7 +21,10 @@ def to_mne(h5_path, stream, t1, t2, voice=None, confirmed_only=True):
     with h5py.File(h5_path,"r") as f:
         g = f["streams"][stream]
         fs = g.attrs["fs"]
-        names = [n.decode() for n in g["channel_names"][:]]
+        if "channel_names" in g:
+            names = [n.decode() for n in g["channel_names"][:]]
+        else: #some streams (TDT EMG, mic) have no names, only input numbers
+            names = [f"{stream}_{k}" for k in (g["channels"][:] if "channels" in g else range(1, g["data"].shape[0] + 1))]
         #what each channel is (lead1/lead2/ecog_anterior/emg... and contact number), filled in per rig by clean_dbs
         groups = [x.decode() for x in g["channel_group"][:]] if "channel_group" in g else [""] * len(names)
         contacts = [x.decode() for x in g["channel_contact"][:]] if "channel_contact" in g else [""] * len(names)
@@ -35,10 +39,11 @@ def to_mne(h5_path, stream, t1, t2, voice=None, confirmed_only=True):
     types = [channel_type(n, grp) for n, grp in zip(names, groups)]
     info = mne.create_info(names, fs, types)
     raw = mne.io.RawArray(data, info)
-    try:
-        times = stim_times(h5_path, voice, confirmed_only)
-    except KeyError: #no stim table (old file): the signal is still fine, just no pulses to mark
-        times = np.array([])
+    with h5py.File(h5_path, "r") as f:
+        has_stim = "stim" in f
+    times = stim_times(h5_path, voice, confirmed_only) if has_stim else np.array([]) #no stim table (old file): the signal is still fine, no pulses to mark
+    if has_stim and voice is not None and len(times) == 0:
+        warnings.warn(f'no pulses with voice "{voice}" in {Path(h5_path).name} (BrainVision files have no voices)')
     t0 = start + i0 / fs #exact time of the Raw's first sample (t1 rounded down to a whole sample)
     inside = (times >= t0) & (times < t0 + data.shape[1] / fs)
     onsets = times[inside] - t0

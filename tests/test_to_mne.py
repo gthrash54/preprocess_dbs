@@ -71,3 +71,14 @@ def test_no_stim_table_still_loads(tmp_path):
     path = tmp_path / "block.h5"
     _fake_cleaned(path) #has no stim table
     assert len(to_mne(path, "ecos", 0, 1).annotations) == 0
+
+
+def test_stream_without_channel_names(tmp_path):
+    #TDT EMG and mic streams have input numbers but no names
+    path = tmp_path / "block.h5"
+    with h5py.File(path, "w") as f:
+        g = f.create_group("streams").create_group("emgg")
+        g.create_dataset("data", data=np.zeros((2, 100), dtype=np.float32))
+        g.create_dataset("channels", data=np.array([1, 2]))
+        g.attrs["fs"] = 1000.0
+    assert to_mne(path, "emgg", 0, 0.1).ch_names == ["emgg_1", "emgg_2"]

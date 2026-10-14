@@ -37,7 +37,8 @@ def make_epochs(raw, tmin=-0.002, tmax= 0.025, event= "stim", baseline=None):
     Cuts a short window of signal around every event, e.g. every stim pulse
     Input:
     raw: MNE Raw from to_mne (its pulses are annotations called "stim")
-    tmin, tmax: window around each event, in seconds (default -2 ms to +25 ms, the lab's ERNA window)
+    tmin, tmax: window around each event, in seconds (default -2 ms to +25 ms). Not the lab's window: its epochs run to the next
+        pulse (about 100 ms for singles), and its z-score and baselines use the last 5-7 ms, so set tmax to match when you need those
     event: which annotation to cut around (default "stim")
     baseline: MNE baseline window to subtract, e.g. (-0.2, 0); None (default) subtracts nothing, which ERNA needs
         since only 2 ms come before the stim artifact

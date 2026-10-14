@@ -7,8 +7,8 @@ from preprocess_dbs.rereference import bipolar_names, rereference
 def test_pairs_stay_on_one_level():
     #2-4 are the lower segments and 5-7 the upper ones; a pair never crosses levels
     anode, cathode = bipolar_names("lead1")
-    assert list(zip(anode, cathode)) == [("lead1_c2", "lead1_c3"), ("lead1_c3", "lead1_c4"), ("lead1_c4", "lead1_c2"),
-                                         ("lead1_c5", "lead1_c6"), ("lead1_c6", "lead1_c7"), ("lead1_c7", "lead1_c5")]
+    assert list(zip(anode, cathode)) == [("lead1_c3", "lead1_c2"), ("lead1_c4", "lead1_c3"), ("lead1_c2", "lead1_c4"),
+                                         ("lead1_c6", "lead1_c5"), ("lead1_c7", "lead1_c6"), ("lead1_c5", "lead1_c7")]
 
 
 def test_pair_is_anode_minus_cathode():
@@ -16,7 +16,7 @@ def test_pair_is_anode_minus_cathode():
     data = np.random.default_rng(0).normal(size=(len(names), 500))
     raw = mne.io.RawArray(data, mne.create_info(names, 1000.0, ["ecog"] + ["dbs"] * 8), verbose=False)
     bip = rereference(raw, ["lead1"])
-    assert np.allclose(bip.get_data(picks="lead1_c2-lead1_c3")[0], data[2] - data[3]) #row 2 is c2, row 3 is c3
+    assert np.allclose(bip.get_data(picks="lead1_c3-lead1_c2")[0], data[3] - data[2]) #the lab's dbs_3_2 = c3 - c2 (row 3 is c3, row 2 is c2)
     assert {"ecog_a1", "lead1_c1", "lead1_c8"} <= set(bip.ch_names) #rings and ECoG are left alone
     assert raw.ch_names == names #the original Raw isn't changed
 
