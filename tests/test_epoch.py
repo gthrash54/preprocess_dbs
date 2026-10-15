@@ -297,3 +297,111 @@ def test_uh3021_matches_the_lab():
         epochs = mne.Epochs(raw, np.array([[int(0.3 * fs), 0, 1]]), tmin=-0.002, tmax=windows[label], baseline=None, verbose=False)
         assert len(epochs.times) == n, label
     assert lab["single"] == 4977 and lab["paired_0.45_1"] == 4984 and lab["burst_1"] == 469 #the spec's own examples
+
+
+def test_group_by_gaps():
+    from preprocess_dbs.epoch import group_by_gaps
+    #a 0.3 ms pair, a single 50 ms later, then a burst starting 50 ms after that (the lesson's toy)
+    assert group_by_gaps([0.0, 0.0003, 0.0503, 0.1003, 0.1080, 0.1157]) == [0, 0, 1, 2, 2, 2]
+    assert group_by_gaps([]) == []
+    assert group_by_gaps([5.0]) == [0]
+    assert group_by_gaps([0.0, 0.040, 0.0801]) == [0, 0, 1] #exactly 40 ms stays in the group; 40.1 ms starts a new one
+    assert group_by_gaps([0.0, 0.040, 0.0801], max_gap_ms=30) == [0, 1, 2]
+
+
+def _timing_table(groups, quiet_ms=50.0):
+    #pulse times (s) for groups back to back: each group is a list of gaps in ms between its pulses ([] = a single),
+    #with quiet_ms between groups; plus a leading and a trailing single, since the first and last group are never labeled
+    times, t = [0.0], 0.0
+    for gaps in [[]] + groups + [[]]:
+        t += quiet_ms / 1000
+        times.append(t)
+        for g in gaps:
+            t += g / 1000
+            times.append(t)
+    return np.array(times[1:])
+
+
+def test_label_by_timing():
+    from preprocess_dbs.epoch import label_by_timing
+    groups = [[]] * 5 + [[0.3]] * 5 + [[7.7] * 9] * 5 #5 singles, 5 pairs 0.3 ms apart, 5 bursts of 10 at 7.7 ms
+    times = _timing_table(groups)
+    labels = label_by_timing(times)[1:-1] #the first and last group are left unlabeled (may be cut off)
+    assert labels == ["single"] * 5 + ["paired_0.3_1", "paired_0.3_2"] * 5 + [f"burst_{k}" for k in range(1, 11)] * 5
+
+
+def test_label_by_timing_sham_and_mixed_current():
+    from preprocess_dbs.epoch import label_by_timing
+    times = _timing_table([[]] * 10)
+    current = np.array([3000.0] * 6 + [0.0] * 6) #first 6 singles live, last 6 zero current
+    labels = label_by_timing(times, amplitudes=current)
+    assert labels[1:5] == ["single"] * 4 and labels[6:11] == ["sham_single"] * 5
+    #a pair whose two pulses differ, one live and one at zero, doesn't add up
+    times = _timing_table([[0.8]] * 6)
+    current = np.full(len(times), 3000.0)
+    current[1 + 2 * 2] = 0.0 #second pulse of the third pair
+    with pytest.warns(UserWarning, match="mixes zero and nonzero"):
+        labels = label_by_timing(times, amplitudes=current)
+    assert labels[5:7] == ["", ""]
+
+
+def test_label_by_timing_leaves_out_what_it_cant_trust():
+    from preprocess_dbs.epoch import label_by_timing
+    #an uneven 10-pulse group, a 4-pulse group, and a one-off 38.8 ms "pair" among 5 real pairs
+    times = _timing_table([[7.7] * 8 + [9.1]] + [[2.0, 2.0, 2.0]] + [[38.8]] + [[2.0]] * 5)
+    with pytest.warns(UserWarning) as caught:
+        labels = label_by_timing(times)
+    assert labels[1:17] == [""] * 16 and labels[17:-1] == ["paired_2.0_1", "paired_2.0_2"] * 5
+    message = " ".join(str(w.message) for w in caught)
+    assert "isn't a single, a pair or an even 10-pulse burst" in message and "fewer than 5 groups" in message
+    assert "close to max_gap_ms" in message #the 38.8 ms gap sits near the 40 ms split
+    #a group within 1 s of a recording dropout is left out, however clean it looks
+    times = _timing_table([[]] * 30, quiet_ms=300) #singles 300 ms apart, so only the ones near the dropout are close to it
+    with pytest.warns(UserWarning, match="recording dropout"):
+        labels = label_by_timing(times, gap_times=[times[15]])
+    assert labels[15] == "" and labels[2] == "single"
+
+
+def test_label_by_timing_groups_on_the_clock():
+    from preprocess_dbs.epoch import label_by_timing
+    #after a dropout BrainVision's own time axis loses the missing time, so two singles 50 ms apart on the clock can sit
+    #10 ms apart on "time"; grouping on the clock keeps them apart
+    clock = _timing_table([[]] * 8)
+    times = clock.copy()
+    times[5:] -= 0.040 #40 ms went missing before pulse 5
+    with pytest.warns(UserWarning):
+        assert label_by_timing(times, clock_times=clock, near_gap_s=0)[4:6] == ["single", "single"]
+        assert label_by_timing(times, near_gap_s=0)[4:6] == ["", ""] #on "time" they'd merge into a 10 ms "pair" seen once
+    with pytest.raises(ValueError, match="same length"):
+        label_by_timing([0.0, 1.0], clock_times=[0.0])
+
+
+def test_label_by_timing_checks_its_inputs():
+    from preprocess_dbs.epoch import label_by_timing, group_by_gaps, condition_windows, _pair_position
+    clock = _timing_table([[]] * 8)
+    with pytest.raises(ValueError, match="out of order"): #a shuffled time column next to a sorted clock
+        label_by_timing(clock[::-1].copy(), clock_times=clock)
+    for bad in ({"near_gap_s": np.nan}, {"burst_tol_ms": -1}, {"min_groups": 0}, {"gap_times": [np.nan]}):
+        with pytest.raises(ValueError):
+            label_by_timing(clock, **bad)
+    with pytest.raises(ValueError, match="max_gap_ms"):
+        group_by_gaps(clock, max_gap_ms=-1)
+    with pytest.raises(ValueError, match="in order"):
+        group_by_gaps([0.2, 0.1])
+    #two pulses at the same moment are a marker logged twice, not a 0.0 ms pair
+    times = _timing_table([[0.0]] * 6)
+    with pytest.warns(UserWarning, match="same moment"):
+        assert set(label_by_timing(times)) == {""}
+    #some amplitudes unknown: the labels stand, with a warning that some could be shams
+    times = _timing_table([[]] * 10)
+    current = np.full(len(times), 3000.0)
+    current[4] = np.nan
+    with pytest.warns(UserWarning, match="could be sham trials"):
+        label_by_timing(times, amplitudes=current)
+    #gaps close to the 40 ms split get a warning
+    with pytest.warns(UserWarning, match="close to max_gap_ms"):
+        label_by_timing(_timing_table([[38.0]] * 6))
+    #pair labels are recognised exactly
+    assert (_pair_position("paired_2.89_1"), _pair_position("sham_paired_0.3_2"), _pair_position("unpaired_9_1"),
+            _pair_position("burst_1")) == (1, 2, None, None)
+    assert condition_windows([0.0, 0.1, 0.2], ["unpaired_9_1"] * 3)["unpaired_9_1"] == pytest.approx(0.0999)

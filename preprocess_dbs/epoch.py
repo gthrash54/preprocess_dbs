@@ -1,5 +1,6 @@
 import h5py
 import warnings
+import collections
 import numpy as np
 from pathlib import Path
 import mne 
@@ -231,13 +232,20 @@ def _probes_follow(counts, periods, times, every_pulse, m, tol_ms):
         return False
     return bool((times[p] - times[p - 1]) * 1000 <= 1.5 * periods[p])
 
+def _pair_position(label):
+    #1 or 2 for the first or second pulse of a pair label ("paired_2.89_1", "sham_paired_0.3_2"), otherwise None
+    parts = label.split("_")
+    if len(parts) >= 3 and parts[-3] == "paired" and parts[-1] in ("1", "2") and parts[:-3] in ([], ["sham"]):
+        return int(parts[-1])
+    return None
+
 def condition_windows(times, labels, max_gap=2.0):
     """
     Measures how long each condition's epochs can be: from its pulse to just before the next pulse
     Input:
     times: the stim table's "time" column in seconds, the full table, so times[k] and labels[k] are the same pulse.
         Not stim_times(), which can drop pulses (unconfirmed, other voices) whose artifacts are still in the signal
-    labels: the labels from classify_pulses, one per row of the same stim table
+    labels: the labels from classify_pulses or label_by_timing, one per row of the same stim table
     max_gap: a gap longer than this (seconds, default 2) is a pause, not a next pulse (14 s and 21 s between stim contacts
         in uh3021), so the pulse before it is skipped like the last pulse of the table
     Returns: a dictionary {label: window end in seconds after the pulse}, to use as make_epochs' tmax for that condition.
@@ -285,9 +293,9 @@ def condition_windows(times, labels, max_gap=2.0):
         label = labels[k]
         if (label == ""):
             continue
-        if label.startswith("paired") and label.endswith("_2"):
+        if _pair_position(label) == 2:
             continue
-        first_of_pair = label.startswith("paired") and label.endswith("_1")
+        first_of_pair = _pair_position(label) == 1
         if first_of_pair and k+1 < len(times) and labels[k+1] != label[:-1] + "2":
             raise ValueError(f"another pulse falls between the two pulses of {label} at row {k} (e.g. a second voice): "
                              "which pulses should end a window isn't decided yet")
@@ -313,8 +321,139 @@ def condition_windows(times, labels, max_gap=2.0):
         windows.pop(label, None)
     if too_close:
         warnings.warn(f"no window for {sorted(too_close)}: one of their pulses has a next pulse less than 0.1 ms away")
-    wanted = {label for label in labels if label and not (label.startswith("paired") and label.endswith("_2"))}
+    wanted = {label for label in labels if label and _pair_position(label) != 2}
     missing = sorted(wanted - set(windows) - too_close)
     if missing:
         warnings.warn(f"no window for {missing}: none of their pulses has a next pulse within max_gap ({max_gap} s)")
     return windows
+def group_by_gaps(times, max_gap_ms=40.0):
+    """
+    Splits pulses into groups by the gaps between them: a long gap starts a new group
+    Input:
+    times: pulse times in seconds, in table order. For BrainVision use the stim table's "time_clock" column, not "time":
+        BrainVision glues the data together after a recording dropout, so on "time" a gap across a dropout looks too short
+    max_gap_ms: a gap longer than this starts a new group (default 40 ms, which suits UG: its longest common gap inside a
+        group is 33.5 ms and its trial clock is 50 ms; only garbled stretches near dropouts have gaps in between)
+    Returns: a list of group numbers, one per pulse, counting up from 0
+    """
+    if not (np.isfinite(max_gap_ms) and max_gap_ms > 0):
+        raise ValueError(f"max_gap_ms has to be a positive number of ms, not {max_gap_ms}")
+    if not np.all(np.isfinite(times)) or np.any(np.diff(times) < 0):
+        raise ValueError("times have to be known and in order, earliest pulse first")
+    groups = [0] * len(times)
+    group = 0
+    for k in range(1, len(times)):
+        gap_ms = (times[k]-times[k-1])*1000
+        if gap_ms > max_gap_ms:
+            group += 1
+        groups[k] = group
+    return groups
+
+def label_by_timing(times, clock_times=None, gap_times=(), amplitudes=None, max_gap_ms=40.0, near_gap_s=1.0, burst_tol_ms=0.15,
+                    min_groups=5):
+    """
+    Labels each pulse's condition from the timing alone, for stim tables with no stimulator count (BrainVision, e.g. UG)
+    Input:
+    times: the stim table's "time" column in seconds (the recording's own time axis, the one epochs are cut on)
+    clock_times: the stim table's "time_clock" column (BrainVision). Groups are found on it, because on "time" a gap
+        across a recording dropout looks too short (see group_by_gaps). None (default): use times
+    gap_times: when the real recording dropouts happen, on the "time" axis: flags/new_segments/time where is_gap is 1
+    amplitudes: each pulse's current (uA, or mV where that's all a file has), NaN where unknown, or None. A group whose
+        pulses all carry zero current is a sham trial
+    max_gap_ms: a longer gap starts a new group (default 40 ms, see group_by_gaps)
+    near_gap_s: a group with a pulse this close to a recording dropout is left unlabeled (default 1 s): around a dropout
+        the markers come out garbled, as merged or cut-off groups
+    burst_tol_ms: how far a burst's gaps can stray from their middle value and still count as even (default 0.15 ms,
+        about one sample at UG's 10 kHz)
+    min_groups: a condition with fewer groups than this, counted after the other rules, is left unlabeled as a likely
+        glitch (default 5: UG's designed conditions repeat 41 times or more, while a few one-off "pairs" at 7.2, 29.7 and
+        38.8 ms sit in garbled stretches)
+    Returns: a list of labels, one per pulse in the same order: "single", "paired_<gap in ms, to 0.1 ms>_<1 or 2>" (e.g.
+        "paired_0.3_1"), "burst_1" to "burst_10", any of these with "sham_" in front when the whole group carries zero
+        current, or "" for a pulse it can't label. Warns with how many pulses were left unlabeled and why, and when there
+        are no amplitudes (then sham trials can't be told apart from real ones)
+    A burst is any 10 evenly spaced pulses inside one group: there's no check of the rate itself (UG's are 7.7 ms).
+    Left unlabeled: groups of any other size, 10-pulse groups whose gaps aren't even, groups with two pulses at the same
+    moment, groups near a recording dropout,
+    the first and last group of the table (the recording may have cut them off), groups that mix zero and nonzero
+    current (or zero and unknown), and conditions seen in fewer than min_groups groups
+    Built for UG's ERP blocks. Check max_gap_ms on any other block type first (UG's sdcurve and lfp blocks are built
+    differently), and filter out marker codes that aren't stim pulses before calling it
+    """
+    times = np.asarray(times, dtype=float)
+    clock = times if clock_times is None else np.asarray(clock_times, dtype=float)
+    if len(clock) != len(times) or (amplitudes is not None and len(amplitudes) != len(times)):
+        raise ValueError("times, clock_times and amplitudes have to be columns of the same stim table (same length)")
+    if not (np.all(np.isfinite(times)) and np.all(np.isfinite(clock))):
+        raise ValueError("times or clock_times has missing or infinite values, so the gaps can't be measured")
+    if np.any(np.diff(clock) < 0) or np.any(np.diff(times) < 0):
+        raise ValueError("times are out of order: use the stim table's own order, earliest pulse first")
+    for name, value in (("near_gap_s", near_gap_s), ("burst_tol_ms", burst_tol_ms)):
+        if not (np.isfinite(value) and value >= 0):
+            raise ValueError(f"{name} has to be a number of 0 or more, not {value}")
+    if not (isinstance(min_groups, (int, np.integer)) and min_groups >= 1):
+        raise ValueError(f"min_groups has to be a whole number of 1 or more, not {min_groups}")
+    if not np.all(np.isfinite(np.asarray(gap_times, dtype=float))):
+        raise ValueError("gap_times has missing values (NaN)")
+    if len(times) == 0:
+        return []
+    current = np.full(len(times), np.nan) if amplitudes is None else np.asarray(amplitudes, dtype=float)
+    dropouts = np.sort(np.asarray(gap_times, dtype=float))
+    groups = np.asarray(group_by_gaps(clock, max_gap_ms))
+    near_split = np.abs(np.diff(clock) * 1000 - max_gap_ms) <= 0.125 * max_gap_ms #gaps within 12.5% of the split (35-45 ms)
+    if near_split.any():
+        warnings.warn(f"{near_split.sum()} gaps fall close to max_gap_ms ({max_gap_ms:g} ms), so the split between groups may "
+                      "not be clean in this file: check them (in UG they sit in garbled stretches near dropouts)")
+    starts = np.flatnonzero(np.r_[True, np.diff(groups) != 0]) #first row of each group
+    ends = np.r_[starts[1:], len(times)] #one past its last row
+    labels = [""] * len(times)
+    why = collections.Counter()
+    for i, (a, b) in enumerate(zip(starts, ends)):
+        size = b - a
+        if i == 0 or i == len(starts) - 1:
+            why["are in the first or last group of the table (may be cut off)"] += size
+            continue
+        lo, hi = np.searchsorted(dropouts, [times[a] - near_gap_s, times[b - 1] + near_gap_s]) #dropouts near the group
+        if hi > lo:
+            why[f"are within {near_gap_s:g} s of a recording dropout"] += size
+            continue
+        gaps = np.diff(clock[a:b]) * 1000 #the group's own gaps, in ms
+        if np.any(gaps < 0.05): #two pulses at the same moment (a marker logged twice?), not a pair
+            why["are in a group with two pulses at the same moment"] += size
+            continue
+        if size == 1:
+            names = ["single"]
+        elif size == 2:
+            names = [f"paired_{gaps[0]:.1f}_1", f"paired_{gaps[0]:.1f}_2"]
+        elif size == 10 and np.all(np.abs(gaps - np.median(gaps)) <= burst_tol_ms):
+            names = [f"burst_{k}" for k in range(1, 11)]
+        else:
+            why["are in a group that isn't a single, a pair or an even 10-pulse burst"] += size
+            continue
+        if np.all(current[a:b] == 0): #no current in the whole group: a sham trial
+            names = ["sham_" + name for name in names]
+        elif np.any(current[a:b] == 0):
+            why["are in a group that mixes zero and nonzero current"] += size
+            continue
+        labels[a:b] = names
+    groups_seen = collections.Counter() #how many groups each condition has
+    for label in labels:
+        if label in ("single", "sham_single"):
+            groups_seen[label] += 1
+        elif label.endswith("_1"): #a pair or burst, counted once by its first pulse ("burst_10" ends in "_10")
+            groups_seen[label.rsplit("_", 1)[0]] += 1
+    for k, label in enumerate(labels):
+        condition = label if label in ("single", "sham_single") else label.rsplit("_", 1)[0]
+        if label and groups_seen[condition] < min_groups:
+            labels[k] = ""
+            why[f"are in a condition seen in fewer than {min_groups} groups (likely a glitch)"] += 1
+    if why:
+        warnings.warn(f"{sum(why.values())} of {len(labels)} pulses left unlabeled: " +
+                      "; ".join(f"{n} {reason}" for reason, n in why.most_common()))
+    if np.all(np.isnan(current)):
+        warnings.warn("no amplitudes, so sham (zero-current) trials can't be told apart from real ones")
+    elif np.any(np.isnan(current)):
+        unknown = sum(1 for k, label in enumerate(labels) if label and np.isnan(current[k]))
+        if unknown:
+            warnings.warn(f"{unknown} labeled pulses have no amplitude, so they could be sham trials labeled as real ones")
+    return labels
