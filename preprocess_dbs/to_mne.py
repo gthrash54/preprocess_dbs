@@ -13,7 +13,10 @@ def to_mne(h5_path, stream, t1, t2, voice=None, confirmed_only=True):
     voice, confirmed_only: which stim pulses to mark, passed on to stim_times (see epoch.py)
     Returns: MNE RAW array of specified window (volts). Lead contacts are renamed lead<N>_c<contact> (e.g. lead1_c2) whatever
     the rig called them, and channels are typed ecog, dbs, emg or misc. Every stim pulse inside the window is an
-    annotation called "stim" (no annotations if the file has no stim table)
+    annotation called "stim" (no annotations if the file has no stim table). Channels the lab marked do not use
+    (channel_dnu in files from clean_dbs version 7 on) are in raw.info["bads"], so MNE's own tools skip them; the data is
+    kept. Warns when the recording isn't on any do-not-use list ("none": nothing is known, which isn't the same as
+    nothing bad) or the file is older than version 7
     """
 
     if not Path(h5_path).is_file():
@@ -28,6 +31,9 @@ def to_mne(h5_path, stream, t1, t2, voice=None, confirmed_only=True):
         #what each channel is (lead1/lead2/ecog_anterior/emg... and contact number), filled in per rig by clean_dbs
         groups = [x.decode() for x in g["channel_group"][:]] if "channel_group" in g else [""] * len(names)
         contacts = [x.decode() for x in g["channel_contact"][:]] if "channel_contact" in g else [""] * len(names)
+        #1 = the lab marked this channel do not use; dnu_list says where the list came from ("none" = recording not listed)
+        dnu = g["channel_dnu"][:] if "channel_dnu" in g else None
+        listed = g.attrs.get("dnu_list", "")
         start = g.attrs.get("start_time", 0.0) #seconds into the recording of this stream's first sample (usually 0)
         n = g["data"].shape[1]
         i0 = int((t1 - start) * fs) # time x fs = samples
@@ -39,6 +45,13 @@ def to_mne(h5_path, stream, t1, t2, voice=None, confirmed_only=True):
     types = [channel_type(n, grp) for n, grp in zip(names, groups)]
     info = mne.create_info(names, fs, types)
     raw = mne.io.RawArray(data, info)
+    if dnu is not None:
+        raw.info["bads"] = [name for name, flag in zip(names, dnu) if flag == 1]
+    if dnu is None:
+        warnings.warn(f"{Path(h5_path).name} {stream}: no do-not-use flags (cleaned before clean_dbs version 7), so bad channels aren't marked")
+    elif listed in ("", "none"):
+        warnings.warn(f"{Path(h5_path).name} {stream}: this recording isn't on any do-not-use list, so bad channels aren't known "
+                      "(not the same as none being bad)")
     with h5py.File(h5_path, "r") as f:
         has_stim = "stim" in f
     times = stim_times(h5_path, voice, confirmed_only) if has_stim else np.array([]) #no stim table (old file): the signal is still fine, no pulses to mark

@@ -260,7 +260,7 @@ def test_condition_windows_warns_instead_of_going_quiet():
         assert condition_windows([0.0, 0.1, 0.10005], ["single"] * 3) == {}
 
 
-UH3021 = Path("/home/gwt/clean_dbs/clean_dbs_final/out_v3/uh3021/stage1/increment1_depth1.h5")
+UH3021 = Path.home() / "Code/clean_dbs/clean_dbs_final/out_v3/uh3021/stage1/increment1_depth1.h5"
 
 
 @pytest.mark.skipif(not UH3021.is_file(), reason="uh3021 increment1_depth1 cleaned file not on this machine")

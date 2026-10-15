@@ -36,3 +36,13 @@ def test_other_pairs_for_a_ring_lead():
     raw = mne.io.RawArray(np.zeros((4, 100)), mne.create_info(names, 1000.0, "dbs"), verbose=False)
     bip = rereference(raw, ["lead1"], pairs=[(1, 2), (2, 3), (3, 4)])
     assert bip.ch_names == ["lead1_c1-lead1_c2", "lead1_c2-lead1_c3", "lead1_c3-lead1_c4"]
+
+
+def test_pairs_with_a_bad_contact_are_skipped():
+    names = ["lead1_c" + str(c) for c in range(1, 9)]
+    raw = mne.io.RawArray(np.random.default_rng(1).normal(size=(8, 200)), mne.create_info(names, 1000.0, "dbs"), verbose=False)
+    raw.info["bads"] = ["lead1_c3"] #e.g. the lab's do-not-use list
+    with pytest.warns(UserWarning, match="lead1_c3 marked bad"):
+        bip = rereference(raw, ["lead1"])
+    made = [ch for ch in bip.ch_names if "-" in ch]
+    assert made == ["lead1_c2-lead1_c4", "lead1_c6-lead1_c5", "lead1_c7-lead1_c6", "lead1_c5-lead1_c7"] #3-2 and 4-3 left out

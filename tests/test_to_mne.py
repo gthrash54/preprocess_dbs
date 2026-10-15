@@ -1,4 +1,5 @@
 import h5py
+from pathlib import Path
 import numpy as np
 import pytest
 from preprocess_dbs.to_mne import to_mne
@@ -82,3 +83,36 @@ def test_stream_without_channel_names(tmp_path):
         g.create_dataset("channels", data=np.array([1, 2]))
         g.attrs["fs"] = 1000.0
     assert to_mne(path, "emgg", 0, 0.1).ch_names == ["emgg_1", "emgg_2"]
+
+
+def test_do_not_use_channels_become_bads(tmp_path):
+    path = tmp_path / "block.h5"
+    _fake_cleaned(path)
+    with h5py.File(path, "a") as f:
+        g = f["streams"]["ecos"]
+        g.create_dataset("channel_dnu", data=np.array([0, 1, 0, 1], dtype=np.int8))
+        g.attrs["dnu_list"] = "lab sheet: x.xlsx"
+    raw = to_mne(path, "ecos", 0, 1)
+    assert raw.info["bads"] == ["ecog_p1", "lead1_c2"] and raw.ch_names == ["ecog_a1", "ecog_p1", "lead1_c1", "lead1_c2"] #marked, not dropped
+    with h5py.File(path, "a") as f:
+        f["streams"]["ecos"].attrs["dnu_list"] = "none"
+        f["streams"]["ecos"]["channel_dnu"][...] = 0
+    with pytest.warns(UserWarning, match="isn't on any do-not-use list"): #not listed: nothing known, not "none bad"
+        assert to_mne(path, "ecos", 0, 1).info["bads"] == []
+
+
+def test_old_file_without_flags_says_so(tmp_path):
+    path = tmp_path / "block.h5"
+    _fake_cleaned(path)
+    with pytest.warns(UserWarning, match="before clean_dbs version 7"):
+        assert to_mne(path, "ecos", 0, 1).info["bads"] == []
+
+
+PRACTICE_V7 = Path.home() / "Code/clean_dbs/clean_dbs_final/out_v7/uh3021/stage1/increment1_depth1.h5"
+
+
+@pytest.mark.skipif(not PRACTICE_V7.is_file(), reason="version 7 practice file not on this machine")
+def test_uh3021_bads_from_the_lab_sheet():
+    #the lab's sheet marks ECoG a4 and EMG input 3 do not use in this recording
+    assert to_mne(PRACTICE_V7, "ecos", 10, 11).info["bads"] == ["ecog_a4"]
+    assert to_mne(PRACTICE_V7, "emgg", 10, 11).info["bads"] == ["emgg_3"]

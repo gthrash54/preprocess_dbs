@@ -25,19 +25,23 @@ def rereference(raw, leads, pairs=PAIRS):
     leads = list of leads we want to rereference in text e.g. ["lead1", "lead2"]
     pairs: contact pairs, PAIRS unless you give others
     Returns: a new Raw file with the bipolar pairs for each lead. Pairs whose contacts aren't in the recording
-    (lead not implanted, channel missing) are skipped with a warning
+    (lead not implanted, channel missing) or are marked bad (raw.info["bads"], e.g. the lab's do-not-use list) are skipped
+    with a warning
     """
     anode = []
     cathode = []
     for lead in leads:
         a, c = bipolar_names(lead, pairs)
         for an, ca in zip(a, c):
-            if an in raw.ch_names and ca in raw.ch_names:
+            bad = [ch for ch in (an, ca) if ch in raw.info["bads"]]
+            if bad: #a bad contact spoils every pair it's in
+                warnings.warn(f"skipping {an}-{ca}: {' and '.join(bad)} marked bad (do not use)")
+            elif an in raw.ch_names and ca in raw.ch_names:
                 anode.append(an)
                 cathode.append(ca)
             else:
                 warnings.warn(f"skipping {an}-{ca}: not in this recording")
     if not anode:
-        raise ValueError(f"none of the pairs for {leads} are in this recording")
+        raise ValueError(f"no usable pairs for {leads}: each pair is missing from this recording or has a contact marked bad")
     return mne.set_bipolar_reference(raw, anode, cathode, copy = True)
     
