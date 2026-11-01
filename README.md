@@ -47,7 +47,7 @@ Not built yet, roughly in the lab's order:
 - dropping the channels the lab marked do not use (clean_dbs version 7 stores them as `channel_dnu`)
 - splitting each recording by stim contact and dropping the stimulated contact
 - the rest segment
-- the lab's seventh bipolar pair (ring 8 against the average of 5 to 7) and a common average per ECoG strip
+- the lab's other bipolar pairs: it makes 21 in all (the 6 here, plus vertical 5-2, 6-3, 7-4; ring pairs with the averages of 2-4 and 5-7, among them 8 against the average of 5-7; and every contact against 1), and its common average per lead. Its code means to make a common average per ECoG strip but never does (preprocess.m:693)
 - linear detrending
 - cutting each condition's epochs with its own window (`make_epochs` cuts one window around one event name)
 - removing the stim artifact

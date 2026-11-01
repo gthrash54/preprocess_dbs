@@ -39,10 +39,12 @@ def make_epochs(raw, tmin=-0.002, tmax= 0.025, event= "stim", baseline=None):
     Input:
     raw: MNE Raw from to_mne (its pulses are annotations called "stim")
     tmin, tmax: window around each event, in seconds (default -2 ms to +25 ms). Not the lab's window: its epochs run to the next
-        pulse (about 100 ms for singles), and its z-score and baselines use the last 5-7 ms, so set tmax to match when you need those
+        pulse (about 100 ms for singles; see condition_windows). The lab's later steps also need the end of the epoch (the ERNA
+        z-score uses its last 5 ms, the coastline burst index its last 7 ms), so set tmax to match when you need those
     event: which annotation to cut around (default "stim")
-    baseline: MNE baseline window to subtract, e.g. (-0.2, 0); None (default) subtracts nothing, which ERNA needs
-        since only 2 ms come before the stim artifact
+    baseline: MNE baseline window to subtract, e.g. (-0.2, 0); None (default) subtracts nothing. Only 2 ms come before the stim
+        artifact, so a pre-stim baseline doesn't fit ERNA. The lab's parse.m instead subtracts each epoch's own mean (whole window)
+        and, after averaging, the mean of 4-6 ms from the epoch start (about 2-4 ms after the pulse); neither is done here
     Returns: MNE Epochs, one slice per event (epochs x channels x samples)
     """
     n_events = sum(d == event for d in raw.annotations.description)
@@ -95,7 +97,7 @@ def classify_pulses(counts, periods, times, voices=None, tol_ms=0.05):
     voices: the stim table's "voice" column, or None (default) for one voice. Each voice is labeled on its own: a table
         with several voices interleaves their pulses (crosstalk blocks fire A and B at the same moments)
     tol_ms: how far apart two periods, or a period and a measured gap, can be and still match (default 0.05 ms, about
-        one sample at TDT's 24 kHz)
+        2.4 samples at TDT's 48.8 kHz)
     Returns: a list of labels, one per pulse in the same order as the stim table: "single", "paired_<gap in ms>_<1 or 2>"
         (e.g. "paired_2.89_1" and "paired_2.89_2", first and second pulse of a pair), "burst_1" to "burst_10",
         "burstprobes_1" to "burstprobes_20" (a burst, then 10 slower probes right after it), or "" for a pulse it can't
@@ -265,8 +267,9 @@ def condition_windows(times, labels, max_gap=2.0):
         - the lab works out each epoch's length separately (and MATLAB errors if a single's differ). MNE epochs of one
           condition share one length, so each condition gets its shortest. Same result whenever a condition's gaps
           are equal, as they are in uh3021
-        - the lab gives the last pulse of a segment a fixed length and skips the very last pulse of the last plain
-          burst. Here a pulse followed by a pause (over max_gap) or by nothing is skipped
+        - the lab gives a burst or pair that ends a segment a fixed length (500.08 ms, 49.89 ms), never labels a
+          segment's last pulse when it starts a group (its loop stops one short), and errors if a plain burst starts in a
+          segment's last 19 pulses. Here a pulse followed by a pause (over max_gap) or by nothing is skipped
     """
     times = np.asarray(times, dtype=float)
     if len(times) != len(labels): #rows must line up: label k belongs to time k
