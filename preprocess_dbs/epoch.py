@@ -204,3 +204,29 @@ def average_condition(epochs):
     baseline = mean_over_epochs[:,window].mean(axis=1, keepdims=True)
     evoked = mean_over_epochs - baseline
     return evoked
+
+
+def average_segment(raw, times, labels):
+    """
+    Averages every condition in one segment into its evoked response: the lab's parse.m for one stim contact
+    Input:
+    raw: one segment's MNE Raw (e.g. stim2), after rereferencing and detrending, its pulses annotated "stim"
+    times: that segment's pulse times in s, in order (times[idx] from split_by_stim_contact)
+    labels: the matching condition labels (classify_pulses labels[idx]); "" = unlabelled, left out
+    Steps:
+    1. condition_windows: how long each condition's epochs are (to just before the next pulse). Second pulses of pairs
+       get no window of their own, since they sit inside the first pulse's epoch
+    2. label_pulses: renames the pulses by condition, once, so each condition can be cut on its own
+    3. for each condition: make_epochs from 2 ms before each pulse to its window end, then average_condition
+    Returns: {condition: MNE Evoked}, e.g. {"single": ..., "burst_1": ..., "paired_0.45_1": ...}. Each Evoked has the
+        channel names, the time axis (0 = the pulse), nave = how many pulses were averaged, and comment = the condition
+    """
+    windows = condition_windows(times, labels) #{condition: tmax} eg. {"single": 0.0999, "burst_1": 0.0096, ...}
+    labelled = label_pulses(raw, labels) # a copy of raw and its "stim" markers renamed "single", "burst_1", etc
+
+    out = {}
+    for condition, tmax in windows.items():
+        epochs = make_epochs(labelled, tmin=-0.002, tmax=tmax, event=condition)
+        data = average_condition(epochs)
+        out[condition] = mne.EvokedArray(data, epochs.info, tmin=-0.002, nave=len(epochs), comment=condition, verbose=False)
+    return out

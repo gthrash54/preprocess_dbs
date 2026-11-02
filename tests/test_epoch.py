@@ -220,3 +220,35 @@ def test_average_condition_cancels_noise():
     evoked = average_condition(_epochs(response + noise))[0]
     clean = average_condition(_epochs(np.tile(response, (1, 1, 1))))[0] #the response alone, through the same steps
     assert np.std(evoked - clean) < 0.1 #one pulse's noise has std 1.0; after averaging, about 1/sqrt(400) = 0.05
+
+
+def _six_pulse_segment():
+    #the worked example: pulses 0, 1, 4 single; 2-3 a 0.45 ms pair; 5 unlabelled. Random data at TDT's rate
+    fs = 48828.125
+    raw = mne.io.RawArray(np.random.default_rng(6).normal(size=(2, int(fs))), mne.create_info(["a", "b"], fs, "dbs"), verbose=False)
+    times = np.array([0.10, 0.20, 0.30, 0.30045, 0.40, 0.50])
+    labels = ["single", "single", "paired_0.45_1", "paired_0.45_2", "single", ""]
+    raw.set_annotations(mne.Annotations(onset=times, duration=0, description="stim"))
+    return raw, times, labels
+
+
+def test_average_segment_one_evoked_per_condition():
+    from preprocess_dbs.epoch import average_segment
+    raw, times, labels = _six_pulse_segment()
+    out = average_segment(raw, times, labels)
+    assert set(out) == {"single", "paired_0.45_1"} #the 2nd pulse of the pair and the unlabelled pulse get no entry
+    assert out["single"].nave == 3 and out["paired_0.45_1"].nave == 1
+    assert out["single"].comment == "single" and out["single"].ch_names == ["a", "b"]
+    assert out["single"].data.shape == (2, 4977) #the lab's single epoch length at 48.8 kHz (uh3021, parse.m rule)
+    assert out["single"].times[0] == pytest.approx(-0.002, abs=1 / 48828.125) #starts 2 ms before the pulse, to a sample
+
+
+def test_average_segment_matches_doing_it_by_hand():
+    #each Evoked must be exactly label_pulses -> make_epochs -> average_condition for that condition
+    from preprocess_dbs.epoch import average_segment, label_pulses, make_epochs, average_condition, condition_windows
+    raw, times, labels = _six_pulse_segment()
+    out = average_segment(raw, times, labels)
+    labelled = label_pulses(raw, labels)
+    for condition, tmax in condition_windows(times, labels).items():
+        by_hand = average_condition(make_epochs(labelled, tmin=-0.002, tmax=tmax, event=condition))
+        assert np.allclose(out[condition].data, by_hand)
