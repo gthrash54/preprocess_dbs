@@ -116,3 +116,21 @@ def test_uh3021_bads_from_the_lab_sheet():
     #the lab's sheet marks ECoG a4 and EMG input 3 do not use in this recording
     assert to_mne(PRACTICE_V7, "ecos", 10, 11).info["bads"] == ["ecog_a4"]
     assert to_mne(PRACTICE_V7, "emgg", 10, 11).info["bads"] == ["emgg_3"]
+
+
+def test_unplaced_ecog_strip_becomes_bad(tmp_path):
+    #clean_dbs marks a strip that wasn't on the brain with group ecog_<side>_not_placed; its channels must be bads
+    path = tmp_path / "block.h5"
+    _fake_cleaned(path)
+    with h5py.File(path, "a") as f:
+        g = f["streams"]["ecos"]
+        g.create_dataset("channel_group", data=np.array(["ecog_anterior", "ecog_posterior_not_placed", "lead1", "lead1"], dtype="S"))
+        g.create_dataset("channel_contact", data=np.array(["1", "1", "1", "2"], dtype="S"))
+        g.create_dataset("channel_dnu", data=np.array([0, 0, 0, 0], dtype=np.int8)) #not on the do-not-use list
+        g.attrs["dnu_list"] = "lab sheet: x.xlsx"
+    raw = to_mne(path, "ecos", 0, 1)
+    assert raw.info["bads"] == ["ecog_p1"] #bad only because its strip wasn't placed
+    assert raw.get_channel_types(picks="ecog_p1") == ["ecog"] #still loaded, just marked
+    with h5py.File(path, "a") as f:
+        f["streams"]["ecos"]["channel_dnu"][1] = 1 #now also do-not-use
+    assert to_mne(path, "ecos", 0, 1).info["bads"] == ["ecog_p1"] #listed once, not twice

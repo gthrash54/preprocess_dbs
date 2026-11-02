@@ -14,7 +14,7 @@ def to_mne(h5_path, stream, t1, t2, voice=None, confirmed_only=True):
     Returns: MNE RAW array of specified window (volts). Lead contacts are renamed lead<N>_c<contact> (e.g. lead1_c2) whatever
     the rig called them, and channels are typed ecog, dbs, emg or misc. Every stim pulse inside the window is an
     annotation called "stim" (no annotations if the file has no stim table). Channels the lab marked do not use
-    (channel_dnu in files from clean_dbs version 7 on) are in raw.info["bads"], so MNE's own tools skip them; the data is
+    (channel_dnu in files from clean_dbs version 7 on) and ECoG strips that weren't placed (group *_not_placed) are in raw.info["bads"], so MNE's own tools skip them; the data is
     kept. Warns when the recording isn't on any do-not-use list ("none": nothing is known, which isn't the same as
     nothing bad) or the file is older than version 7
     """
@@ -47,6 +47,10 @@ def to_mne(h5_path, stream, t1, t2, voice=None, confirmed_only=True):
     raw = mne.io.RawArray(data, info)
     if dnu is not None:
         raw.info["bads"] = [name for name, flag in zip(names, dnu) if flag == 1]
+    #clean_dbs puts a strip that wasn't placed on the brain in group ecog_<side>_not_placed; its channels are still typed
+    #ecog, so mark them bad too, or ECoG pairs and averages would be made from contacts recording nothing
+    unplaced = [name for name, grp in zip(names, groups) if grp.endswith("_not_placed") and name not in raw.info["bads"]]
+    raw.info["bads"] = raw.info["bads"] + unplaced
     if dnu is None:
         warnings.warn(f"{Path(h5_path).name} {stream}: no do-not-use flags (cleaned before clean_dbs version 7), so bad channels aren't marked")
     elif listed in ("", "none"):

@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 from preprocess_dbs.rereference import (bipolar_names, dbs_rereference, horizontal_pairs, vertical_pairs, ring_pairs, c1_pairs,
                                         all_pairs, erna_pairs, add_virtual_rings, common_average,
-                                        ecog_rereference)
+                                        ecog_rereference, ecog_common_average)
 
 
 def test_pairs_stay_on_one_level():
@@ -182,3 +182,28 @@ def test_bad_middle_contact_is_not_bridged():
     assert "ecog_a3-ecog_a2" not in bip.ch_names
     assert "ecog_a3-ecog_a1" not in bip.ch_names #no bridged pair
     assert len(bip.ch_names) == 8 #only pairs: the unused a1 and the bad a2 aren't left as single channels, as in the lab
+
+
+def test_ecog_common_average_is_per_strip():
+    #a3-avg = a3 - mean(a1-a6), p3-avg = p3 - mean(p1-p6): each strip has its own average
+    raw, data = _ecog()
+    averaged = ecog_common_average(raw)
+    assert len(averaged.ch_names) == 12
+    assert np.allclose(averaged.get_data(picks="ecog_a3-avg")[0], data[2] - data[0:6].mean(axis=0))
+    assert np.allclose(averaged.get_data(picks="ecog_p3-avg")[0], data[8] - data[6:12].mean(axis=0))
+
+
+def test_ecog_common_average_leaves_out_bad_contacts():
+    raw, data = _ecog(bads=["ecog_a2"])
+    averaged = ecog_common_average(raw)
+    assert "ecog_a2-avg" not in averaged.ch_names
+    others = np.delete(data[0:6], 1, axis=0) #a1, a3-a6
+    assert np.allclose(averaged.get_data(picks="ecog_a3-avg")[0], data[2] - others.mean(axis=0))
+
+
+def test_ecog_common_average_skips_a_dead_strip():
+    #posterior strip all bad: warn and keep the anterior average
+    raw, _ = _ecog(bads=[f"ecog_p{k}" for k in range(1, 7)])
+    with pytest.warns(UserWarning, match="ecog_p strip"):
+        averaged = ecog_common_average(raw)
+    assert averaged.ch_names == [f"ecog_a{k}-avg" for k in range(1, 7)]

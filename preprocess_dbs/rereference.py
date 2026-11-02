@@ -140,3 +140,29 @@ def common_average(raw, lead):
     #rename the lead (lead1_c2 to lead1_c2-avg)
     averaged.rename_channels({name: f"{name}-avg" for name in usable})
     return averaged
+
+
+def ecog_common_average(raw):
+    """
+    Input:
+    raw: MNE Raw from to_mne, with do-not-use ECoG contacts in raw.info["bads"]
+    Returns: a new Raw with one channel per usable ECoG contact, ecog_<strip><k>-avg = that contact minus the mean of the
+        usable contacts on its own strip (anterior a1-a6, posterior p1-p6) at each time point. The lab meant to make this
+        (preprocess.m:690-705, ecog_<k>_avg) but never does: its check at P:693 is always false (bug B6), so its saved data
+        has no ECoG common average. A strip with fewer than 2 usable contacts is skipped with a warning. Stim annotations
+        are kept
+    """
+    strips = []
+    for strip in ("a", "p"):
+        names = [f"ecog_{strip}{k}" for k in range(1, 7)]
+        usable = [n for n in names if n in raw.ch_names and n not in raw.info["bads"]]
+        if len(usable) < 2:
+            warnings.warn(f"ecog_{strip} strip has {len(usable)} usable contact(s); no common average for it")
+            continue
+        averaged = raw.copy().pick(usable)
+        averaged.apply_function(lambda x: x - x.mean(axis=0), channel_wise=False) #per strip, never across strips
+        averaged.rename_channels({name: f"{name}-avg" for name in usable})
+        strips.append(averaged)
+    if not strips:
+        raise ValueError("no ECoG strip has 2 usable contacts for a common average")
+    return strips[0].add_channels(strips[1:]) if len(strips) > 1 else strips[0]
