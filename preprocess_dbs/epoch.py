@@ -254,8 +254,9 @@ def condition_windows(times, labels, max_gap=2.0):
         Each window ends 0.1 ms before the next pulse in the table. A pair's window starts at its first pulse and ends
         0.2 ms before the pulse after the pair (the lab takes 0.1 ms off each of the pair's two gaps), so it holds both
         pulses, and second pulses ("paired_<gap>_2") get no window of their own. Each condition uses its shortest gap,
-        so no epoch runs into the next pulse. Unlabeled pulses ("") are skipped. With tmin = -0.002 this gives the lab's
-        epoch lengths in uh3021 (all 41 conditions, e.g. single 4977 samples, 0.45 ms pair 4984, burst_1 469)
+        so no epoch runs into the next pulse. Unlabeled pulses ("") are skipped. With tmin = -0.002, the lengths for uh3021
+        (41 conditions, e.g. single 4977 samples, 0.45 ms pair 4984, burst_1 469) equal those from the lab's parse.m rule
+        recomputed by the uh3021 test; they haven't been compared with any of the lab's saved outputs
     Warns when there's nothing to window (pulses but no labels; an empty table quietly gives {}), when a condition gets
     no window (none of its pulses has a next pulse within max_gap), and when a condition is dropped because one of its
     pulses has a next pulse less than 0.1 ms away (no window would be safe for it)

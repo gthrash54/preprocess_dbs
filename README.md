@@ -41,7 +41,7 @@ Done:
 - loading cleaned files into MNE
 - bipolar re-referencing
 - pulse labels for uh's TDT recordings and UG's BrainVision recordings
-- the lab's epoch lengths for each condition (checked against the lab for all 41 conditions in uh3021)
+- the lab's epoch lengths for each condition (equal to the lab's parse.m rule recomputed for all 41 conditions in uh3021; not yet compared with the lab's saved outputs)
 
 Not built yet, roughly in the lab's order:
 - dropping the channels the lab marked do not use (clean_dbs version 7 stores them as `channel_dnu`)
