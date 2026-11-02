@@ -3,7 +3,7 @@ import warnings
 import numpy as np
 import mne 
 from pathlib import Path
-from preprocess_dbs.epoch import stim_times
+from preprocess_dbs.pulses import stim_times
 def to_mne(h5_path, stream, t1, t2, voice=None, confirmed_only=True):
     """
     Input:
