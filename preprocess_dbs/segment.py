@@ -60,3 +60,31 @@ def rest_window(times, impedance_times=()):
 
     #3 rest ends half a second before the first pulse
     return(start, first - 0.5)
+
+
+def stim_contact(segment, stim_lead):
+    """
+    Input:
+    segment: "stim2", "stim3", or "stim4" (from split_by_stim_contact)
+    stim_lead: the lead being stimulated, 1 or 2(from the block's stim contacts, not from experiment name)
+    Returns:
+    the stimulated contacts channel name (lead1_c2)
+     """
+    contact = segment[4:]
+    name = f"lead{stim_lead}_c{contact}"
+    return name
+
+
+def mark_bad_stim_contact(raw, segment, stim_lead):
+    """
+    Marks the stimulated contact bad in raw. Sarah dropped it by row position (preprocess.m 228-243), so a do not use
+    contact below it shifts which one goes. this fx finds it by name instead
+    """
+    name = stim_contact(segment, stim_lead) #asking stim contact for the name ie lead1_c2
+    if name not in raw.ch_names: # channel not found in the recording at all
+        raise ValueError(f"no channel {name} in the recording; is stim_lead= {stim_lead} correct and was lead {stim_lead} working/loaded")
+    if name not in raw.info["bads"]:
+        raw.info["bads"].append(name)
+    return raw
+
+    

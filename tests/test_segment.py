@@ -1,7 +1,8 @@
 import warnings
 import numpy as np
 import pytest
-from preprocess_dbs.segment import split_by_stim_contact, rest_window
+import mne
+from preprocess_dbs.segment import split_by_stim_contact, rest_window, stim_contact, mark_bad_stim_contact
 
 def _pulses(n=5,start=10.0, gaps=(5.0,5.0), spacing = 0.05):
     #fake block of n pulses per contact with long pause for cable move simulation in between pulses. This is to test segment.py
@@ -94,3 +95,40 @@ def test_rest_starts_9_s_after_the_last_impedance_check():
 def test_less_than_3_s_of_room_gives_no_rest():
     #rest needs first pulse > start + 3 s, strictly. First pulse at 4 s = 1 + 3: exactly on the line, so none
     assert rest_window(_pulses(start=4.0)) is None
+
+
+def _lead1(bads=()):
+    #a tiny fake recording: lead 1 contacts c1-c8, 1 s at 1 kHz, with some contacts already marked do-not-use
+    names = [f"lead1_c{k}" for k in range(1, 9)]
+    raw = mne.io.RawArray(np.zeros((8, 1000)), mne.create_info(names, 1000.0, "dbs"), verbose=False)
+    raw.info["bads"] = list(bads)
+    return raw
+
+
+def test_stim_contact_name():
+    assert stim_contact("stim2", 1) == "lead1_c2"
+    assert stim_contact("stim3", 2) == "lead2_c3" #lead 2 stimulated: same contact numbers, other lead
+
+
+def test_marks_only_the_stim_contact():
+    raw = mark_bad_stim_contact(_lead1(), "stim4", 1)
+    assert raw.info["bads"] == ["lead1_c4"]
+
+
+def test_marks_by_name_when_a_lower_contact_is_dnu():
+    #lab bug (preprocess.m:228-243): it drops the stim contact by row. With c1 do-not-use (already removed), row 2 is c3,
+    #so for stim2 the lab drops c3 and keeps the stimulated c2. By name, c2 is marked whatever the rows are
+    raw = mark_bad_stim_contact(_lead1(bads=["lead1_c1"]), "stim2", 1)
+    assert raw.info["bads"] == ["lead1_c1", "lead1_c2"]
+    assert "lead1_c3" not in raw.info["bads"]
+
+
+def test_already_bad_stim_contact_is_not_added_twice():
+    raw = mark_bad_stim_contact(_lead1(bads=["lead1_c3"]), "stim3", 1)
+    assert raw.info["bads"] == ["lead1_c3"]
+
+
+def test_wrong_stim_lead_raises():
+    #stim_lead=2 but only lead 1 was loaded: stop instead of silently marking nothing
+    with pytest.raises(ValueError, match="lead2_c2"):
+        mark_bad_stim_contact(_lead1(), "stim2", 2)
