@@ -2,7 +2,7 @@ import mne
 import numpy as np
 import pytest
 from preprocess_dbs.rereference import (bipolar_names, rereference, horizontal_pairs, vertical_pairs, ring_pairs, c1_pairs,
-                                        all_pairs, erna_pairs, add_virtual_rings)
+                                        all_pairs, erna_pairs, add_virtual_rings, common_average)
 
 
 def test_pairs_stay_on_one_level():
@@ -104,3 +104,44 @@ def test_all_21_pairs_with_rings():
     raw, _ = _lead()
     bip = rereference(add_virtual_rings(raw, ["lead1"]), ["lead1"])
     assert sum("-" in n for n in bip.ch_names) == 21
+
+
+def test_common_average_is_contact_minus_lead_mean():
+    #the lab's dbs_3_avg = c3 - mean(c1 ... c8) at every time point (get_rereference.m:10-11)
+    raw, data = _lead()
+    averaged = common_average(raw, "lead1")
+    assert averaged.ch_names == [f"lead1_c{k}-avg" for k in range(1, 9)]
+    assert np.allclose(averaged.get_data(picks="lead1_c3-avg")[0], data[2] - data.mean(axis=0)) #row 2 = c3
+
+
+def test_common_average_leaves_out_bad_contacts():
+    #c2 bad (stim2, or do-not-use): averaged over the other 7, and c2 gets no channel of its own
+    raw, data = _lead(bads=["lead1_c2"])
+    averaged = common_average(raw, "lead1")
+    assert "lead1_c2-avg" not in averaged.ch_names
+    others = np.delete(data, 1, axis=0) #every row except row 1 (c2)
+    assert np.allclose(averaged.get_data(picks="lead1_c3-avg")[0], data[2] - others.mean(axis=0))
+
+
+def test_common_average_leaves_out_virtual_rings():
+    #the rings only exist inside the lab's bipolar step, so adding them first mustn't change the average
+    raw, data = _lead()
+    averaged = common_average(add_virtual_rings(raw, ["lead1"]), "lead1")
+    assert len(averaged.ch_names) == 8
+    assert np.allclose(averaged.get_data(picks="lead1_c3-avg")[0], data[2] - data.mean(axis=0))
+
+
+def test_common_average_keeps_stim_annotations():
+    #epoching later needs the stim pulse markers that to_mne puts on raw
+    raw, _ = _lead()
+    raw.set_annotations(mne.Annotations(onset=[0.05, 0.15], duration=[0, 0], description=["stim", "stim"]))
+    averaged = common_average(raw, "lead1")
+    assert list(averaged.annotations.description) == ["stim", "stim"]
+    assert np.allclose(averaged.annotations.onset, [0.05, 0.15])
+
+
+def test_common_average_needs_two_contacts():
+    #one contact minus its own average is all zeros, so stop instead of saving zeros
+    raw, _ = _lead(bads=[f"lead1_c{k}" for k in range(2, 9)]) #only c1 usable
+    with pytest.raises(ValueError, match="at least 2"):
+        common_average(raw, "lead1")

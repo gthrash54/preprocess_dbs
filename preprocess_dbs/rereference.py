@@ -82,3 +82,31 @@ def add_virtual_rings(raw, leads):
                 info = mne.create_info([f"{lead}_c{ring}"], raw.info["sfreq"], "dbs")
                 raw.add_channels([mne.io.RawArray(mean, info, verbose=False)], force_update_info=True)
     return raw
+
+
+def common_average(raw, lead):
+    """
+    Input:
+    raw: MNE Raw from to_mne (NOT the bipolar output, which no longer has single contacts), with do-not-use and stim
+        contacts in raw.info["bads"]
+    lead: e.g. "lead1"
+
+    Returns: a new Raw with one channel per usable contact, lead<N>_c<k>-avg = that contact minus the mean of all usable
+        contacts c1-c8 on the lead at each time point (the lab's get_rereference.m:8-16, labelled dbs_<k>_avg). The virtual
+        rings aren't included, as in the lab. Stim annotations are kept
+    """
+    #1 the usable contacts
+    names = [f"{lead}_c{k}" for k in range(1, 9)] # lead1_c1 ... lead1_c8
+    usable = [n for n in names if n in raw.ch_names and n not in raw.info["bads"]]
+
+    # need at least 2 or every contact minus average is just zero
+    if len(usable) < 2:
+        raise ValueError(f"{lead} has {len(usable)} usable contact(s) ({usable}); a common average needs at least 2")
+
+    # copy only usable channels and subtract the mean across them at each time point
+    averaged = raw.copy().pick(usable)
+    averaged.apply_function(lambda x: x - x.mean(axis=0), channel_wise=False)
+
+    #rename the lead (lead1_c2 to lead1_c2-avg)
+    averaged.rename_channels({name: f"{name}-avg" for name in usable})
+    return averaged
