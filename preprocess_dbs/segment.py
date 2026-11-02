@@ -37,3 +37,26 @@ def split_by_stim_contact(times, gap_s = 3.0):
         t2 = times[idx[-1]] + 0.050 # last pulse + 50 ms
         out[name] = (t1, t2, idx)
     return out
+
+
+def rest_window(times, impedance_times=()):
+    """
+    Input:
+    times: pulse onsets in s (from stim_times)
+    impedance_times: when impedance checks happened in this block, in s(empty if none)
+    Returns: (t1,t2) of the rest window in s, or None if there isnt enough time before the first pulse
+    """
+    #1 where rest starts: 1s in or 9s after the last impedance check
+    #lab: preprocess.m:364-390, only the else branch ever runs (its comments describe the dead branch)
+    if len(impedance_times) ==0:
+        start = 1 # 1 second in
+    else:
+        start = max(impedance_times) + 9 # 9 seconds after the last impedance check
+
+    #2 too little time before first pulse? no rest
+    first = times[0]
+    if first <= start + 3:
+        return None
+
+    #3 rest ends half a second before the first pulse
+    return(start, first - 0.5)

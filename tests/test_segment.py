@@ -1,7 +1,7 @@
 import warnings
 import numpy as np
 import pytest
-from preprocess_dbs.segment import split_by_stim_contact
+from preprocess_dbs.segment import split_by_stim_contact, rest_window
 
 def _pulses(n=5,start=10.0, gaps=(5.0,5.0), spacing = 0.05):
     #fake block of n pulses per contact with long pause for cable move simulation in between pulses. This is to test segment.py
@@ -73,3 +73,24 @@ def test_pause_of_exactly_gap_s_is_not_a_move():
     #cable move: only 1 move is found, and the code can't tell the contacts apart
     with pytest.raises(ValueError, match="found 1"):
         split_by_stim_contact(_pulses(gaps=(5.0, 3.0)))
+
+
+def test_rest_without_impedance_check():
+    #first pulse at 10 s: rest from 1 s to 10 - 0.5 s (preprocess.m:364-390)
+    assert rest_window(_pulses()) == pytest.approx((1.0, 9.5))
+
+
+def test_impedance_check_too_close_gives_no_rest():
+    #check at 2 s: rest would start at 2 + 9 = 11 s, after the first pulse at 10 s, so none
+    assert rest_window(_pulses(), impedance_times=[2.0]) is None
+
+
+def test_rest_starts_9_s_after_the_last_impedance_check():
+    #checks at 3 s and 10 s, first pulse at 30 s: the LAST check counts, so rest is 10 + 9 = 19 s to 29.5 s
+    times = _pulses(start=30.0)
+    assert rest_window(times, impedance_times=[3.0, 10.0]) == pytest.approx((19.0, 29.5))
+
+
+def test_less_than_3_s_of_room_gives_no_rest():
+    #rest needs first pulse > start + 3 s, strictly. First pulse at 4 s = 1 + 3: exactly on the line, so none
+    assert rest_window(_pulses(start=4.0)) is None
