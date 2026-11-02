@@ -1,0 +1,23 @@
+gap_ms,doubled,lab_name,erna_label,note
+0.246,0,pp1,pp0.3,lab x = 0.146 (parse.m pair table); gap = x + 0.1 ms
+0.451,0,pp1,pp0.3,lab x = 0.351 (uh3005 on: longer gap for the abs-ref pair)
+0.963,0,pp5,pp0.8,
+1.925,0,pp10,pp1.8,
+2.888,0,pp14,pp2.8,
+3.850,0,pp16,pp3.8,
+4.813,0,pp17,pp4.7,
+5.775,0,pp18,pp5.7,
+6.738,0,pp19,pp6.6,
+7.680,0,pp20,pp7.6,
+15.380,0,pp23,pp15.3,
+0.492,1,pp1_2,,uh3001/uh3006 (doubled periods); the lab's ERNA script skips this one
+0.901,1,pp1_2,,
+1.925,1,pp5_2,pp1.8,
+3.850,1,pp10_2,pp3.8,
+5.775,1,pp14_2,,
+7.700,1,pp16_2,pp7.6,
+9.626,1,pp17_2,,
+11.551,1,pp18_2,,
+13.476,1,pp19_2,,
+15.360,1,pp20_2,pp15.3,
+30.761,1,pp23_2,,

@@ -15,3 +15,6 @@ dev = ["pytest"] #only needed to run the tests
 
 [tool.setuptools]
 packages = ["preprocess_dbs"]
+
+[tool.setuptools.package-data]
+preprocess_dbs = ["tables/*.csv"] #the lookup tables ship with the package

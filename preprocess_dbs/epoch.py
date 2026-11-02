@@ -55,7 +55,7 @@ def select_pulses(raw, gap_before=0.05, gap_after=0.0, event="stim"):
     return out
 
 
-def condition_windows(times, labels, max_gap=2.0):
+def condition_windows(times, labels, max_gap=2.0, pair_tail=None):
     """
     Measures how long each condition's epochs can be: from its pulse to just before the next pulse
     Input:
@@ -64,6 +64,9 @@ def condition_windows(times, labels, max_gap=2.0):
     labels: the labels from classify_pulses or label_by_timing, one per row of the same stim table
     max_gap: a gap longer than this (seconds, default 2) is a pause, not a next pulse (14 s and 21 s between stim contacts
         in uh3021), so the pulse before it is skipped like the last pulse of the table
+    pair_tail: None (default), or the fixed time in seconds to keep after a pair's second pulse instead of running to the
+        next pulse: conditions.doubled_pair_tail for uh3001/uh3006, as the lab does (parse.m:261-263). Never runs past
+        0.2 ms before the next pulse
     Returns: a dictionary {label: window end in seconds after the pulse}, to use as make_epochs' tmax for that condition.
         Each window ends 0.1 ms before the next pulse in the table. A pair's window starts at its first pulse and ends
         0.2 ms before the pulse after the pair (the lab takes 0.1 ms off each of the pair's two gaps), so it holds both
@@ -121,6 +124,14 @@ def condition_windows(times, labels, max_gap=2.0):
             next_row = k+2
         else:
             next_row = k+1
+        if first_of_pair and pair_tail is not None and k+1 < len(times):
+            #doubled-period patients: a fixed time after the second pulse, capped before the next pulse if that comes first
+            end = (times[k+1] - times[k]) - 0.0001 + pair_tail
+            if next_row < len(times) and times[next_row] - times[k] <= max_gap:
+                end = min(end, times[next_row] - times[k] - 0.0002)
+            if label not in windows or end < windows[label]:
+                windows[label] = end
+            continue
         if next_row >= len(times):
             continue
         gap = times[next_row] - times[k]
@@ -206,13 +217,14 @@ def average_condition(epochs):
     return evoked
 
 
-def average_segment(raw, times, labels):
+def average_segment(raw, times, labels, pair_tail=None):
     """
     Averages every condition in one segment into its evoked response: the lab's parse.m for one stim contact
     Input:
     raw: one segment's MNE Raw (e.g. stim2), after rereferencing and detrending, its pulses annotated "stim"
     times: that segment's pulse times in s, in order (times[idx] from split_by_stim_contact)
     labels: the matching condition labels (classify_pulses labels[idx]); "" = unlabelled, left out
+    pair_tail: passed to condition_windows; conditions.doubled_pair_tail for uh3001/uh3006, None for everyone else
     Steps:
     1. condition_windows: how long each condition's epochs are (to just before the next pulse). Second pulses of pairs
        get no window of their own, since they sit inside the first pulse's epoch
@@ -221,7 +233,7 @@ def average_segment(raw, times, labels):
     Returns: {condition: MNE Evoked}, e.g. {"single": ..., "burst_1": ..., "paired_0.45_1": ...}. Each Evoked has the
         channel names, the time axis (0 = the pulse), nave = how many pulses were averaged, and comment = the condition
     """
-    windows = condition_windows(times, labels) #{condition: tmax} eg. {"single": 0.0999, "burst_1": 0.0096, ...}
+    windows = condition_windows(times, labels, pair_tail=pair_tail) #{condition: tmax} eg. {"single": 0.0999, "burst_1": 0.0096, ...}
     labelled = label_pulses(raw, labels) # a copy of raw and its "stim" markers renamed "single", "burst_1", etc
 
     out = {}
