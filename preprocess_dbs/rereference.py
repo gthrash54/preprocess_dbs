@@ -16,35 +16,30 @@ all_pairs = horizontal_pairs + vertical_pairs + ring_pairs + c1_pairs #the lab's
 #(8, 567) = the top ring (c8) minus the upper level as a virtual ring (mean of c5, c6, c7): a non-directional pair at
 #the top of the lead. Sarah's code doesn't say why this ring pair and not the others
 erna_pairs = horizontal_pairs + [(8, 567)]
+## ecog pairs for anterior and posterior strip
+ecog_pairs = [(2, 1), (3, 2), (4, 3), (5, 4), (6, 5)]
 
-def bipolar_names(lead, pairs=all_pairs):
+
+def bipolar_names(prefix, pairs=all_pairs):
     """
     defines the name for the leads we want to bipolar re-reference 
-    input: lead we want to reference in text ie "lead1"
+    prefix: the start of each channel name, e.g. "lead1_c" (lead1_c3) or "ecog_a" (ecog_a3)
     pairs: contact pairs (A, B) = A - B; all_pairs unless you give others (e.g. erna_pairs, or [(1, 2), (2, 3), (3, 4)] for a
         4-ring lead)
     returns(anode,cathode) ie which leads we are bipolar referencing
     """
-    anode = [f"{lead}_c{a}" for a,b in pairs]
-    cathode = [f"{lead}_c{b}" for a,b in pairs]
+    anode = [f"{prefix}{a}" for a, b in pairs]
+    cathode = [f"{prefix}{b}" for a, b in pairs]
     return anode, cathode
 
 
-def rereference(raw, leads, pairs=all_pairs):
-    """
-    This will rereference bipolar leads of your choice
-    Input:
-    raw = MNE raw array file from to_mne, THIS FIRST STEP MUST BE DONE
-    leads = list of leads we want to rereference in text e.g. ["lead1", "lead2"]
-    pairs: contact pairs (A, B) = A - B; all_pairs unless you give others (erna_pairs for only the 7 the lab uses for ERNA)
-    Returns: a new Raw file with the bipolar pairs for each lead. Pairs whose contacts aren't in the recording
-    (lead not implanted, channel missing) or are marked bad (raw.info["bads"], e.g. the lab's do-not-use list) are skipped
-    with a warning
-    """
+def _bipolar(raw, prefixes, pairs):
+    #shared by dbs_rereference and ecog_rereference: makes each pair for each name prefix (lead1_c, ecog_a, ...),
+    #skipping with a warning any pair with a contact that's missing or marked bad
     anode = []
     cathode = []
-    for lead in leads:
-        a, c = bipolar_names(lead, pairs)
+    for prefix in prefixes:
+        a, c = bipolar_names(prefix, pairs)
         for an, ca in zip(a, c):
             bad = [ch for ch in (an, ca) if ch in raw.info["bads"]]
             if bad: #a bad contact spoils every pair it's in
@@ -55,8 +50,43 @@ def rereference(raw, leads, pairs=all_pairs):
             else:
                 warnings.warn(f"skipping {an}-{ca}: not in this recording")
     if not anode:
-        raise ValueError(f"no usable pairs for {leads}: each pair is missing from this recording or has a contact marked bad")
-    return mne.set_bipolar_reference(raw, anode, cathode, copy = True)
+        raise ValueError(f"no usable pairs for {prefixes}: each pair is missing from this recording or has a contact marked bad")
+    bip = mne.set_bipolar_reference(raw, anode, cathode, copy=True)
+    #MNE only removes the contacts a pair used, so a contact no pair used (e.g. a bad one) would stay as a single channel;
+    #the lab's bipolar output holds only pairs, so drop those. Other channels (EMG, the other modality) stay
+    leftover = [n for n in bip.ch_names if n.startswith(tuple(prefixes)) and "-" not in n]
+    return bip.drop_channels(leftover)
+
+
+def dbs_rereference(raw, leads, pairs=all_pairs):
+    """
+    This will rereference bipolar leads of your choice
+    Input:
+    raw = MNE raw array file from to_mne, THIS FIRST STEP MUST BE DONE
+    leads = list of leads we want to rereference in text e.g. ["lead1", "lead2"]
+    pairs: contact pairs (A, B) = A - B; all_pairs unless you give others (erna_pairs for only the 7 the lab uses for ERNA)
+    Returns: a new Raw file with the bipolar pairs for each lead. Pairs whose contacts aren't in the recording
+    (lead not implanted, channel missing) or are marked bad (raw.info["bads"], e.g. the lab's do-not-use list) are skipped
+    with a warning
+    """
+    return _bipolar(raw, [f"{lead}_c" for lead in leads], pairs)
+
+
+def ecog_rereference(raw, pairs=ecog_pairs):
+    """
+    Input:
+    raw: MNE Raw from to_mne, with do-not-use ECoG contacts in raw.info["bads"]
+    pairs: contact pairs (A, B) = A - B within a strip; ecog_pairs (each contact minus the one below it) unless you give others
+    Returns: a new Raw with the bipolar pairs on the anterior (ecog_a1-6) and posterior (ecog_p1-6) strips; pairs never
+        cross strips. A pair with a bad or missing contact is skipped with a warning
+    """
+    for strip in ("a", "p"):
+        for k in range(2, 6):
+            name = f"ecog_{strip}{k}"
+            if name in raw.info["bads"]:
+                warnings.warn(f"{name} is bad: the lab would pair ecog_{strip}{k+1} with ecog_{strip}{k-1} across it (double spacing); "
+                              "we skip that pair")
+    return _bipolar(raw, ["ecog_a", "ecog_p"], pairs)
 
 
 
