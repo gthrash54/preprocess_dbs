@@ -87,4 +87,3 @@ def mark_bad_stim_contact(raw, segment, stim_lead):
         raw.info["bads"].append(name)
     return raw
 
-    
