@@ -178,3 +178,29 @@ def label_pulses(raw, labels, event="stim"):
     raw.set_annotations(new_annotations)
     return raw
 
+def average_condition(epochs):
+    """
+    Averages one condition's epochs into its evoked response, the lab's way (parse.m). Each pulse's response is small and
+    buried in noise, but it's the same every time while the noise isn't, so averaging many pulses keeps the response and
+    cancels the noise
+    Input:
+    epochs: MNE Epochs of ONE condition (e.g. all "single" pulses), from label_pulses + make_epochs with tmin=-0.002,
+        so every epoch starts 2 ms before its pulse. Its data is epochs x channels x time
+    Steps:
+    1. subtract each epoch's own mean (over time), so pulses that landed at different voltage levels line up
+    2. average across epochs: epochs x channels x time -> channels x time
+    3. subtract, per channel, the mean of samples round(0.004*fs) to round(0.006*fs) counted from the epoch start
+       (the lab's 1-based inclusive MATLAB range, so [start-1:end] here). That's about 2-4 ms after the pulse, which may
+       overlap the response itself (open question Q6); copied from the lab for now
+    Returns: the evoked response as a numpy array, channels x time (same channel order as epochs)
+    """
+    data = epochs.get_data()
+    demeaned_time = data - data.mean(axis=2, keepdims=True)
+    mean_over_epochs = demeaned_time.mean(axis=0)
+    fs = epochs.info["sfreq"]
+    start = round(0.004*fs)-1
+    end = round(0.006*fs)
+    window = slice(start,end)
+    baseline = mean_over_epochs[:,window].mean(axis=1, keepdims=True)
+    evoked = mean_over_epochs - baseline
+    return evoked

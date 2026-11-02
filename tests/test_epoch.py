@@ -190,3 +190,33 @@ def test_label_pulses_after_crop_keeps_times_and_spans():
     after = mne.events_from_annotations(out, event_id={"single": 1}, verbose=False)[0][:, 0]
     assert list(after) == list(before)
     assert out.annotations.duration[list(out.annotations.description).index("BAD_seg")] == 1.0
+
+
+def _epochs(data, fs=48828.125):
+    #MNE Epochs straight from an array (epochs x channels x time), starting 2 ms before each pulse as make_epochs does
+    info = mne.create_info([f"ch{k}" for k in range(data.shape[1])], fs, "dbs")
+    return mne.EpochsArray(data, info, tmin=-0.002, verbose=False)
+
+
+def test_average_condition_is_the_labs_three_steps():
+    #parse.m: demean each epoch, average, subtract the mean of samples 195-293 (MATLAB, 1-based inclusive) at 48828 Hz,
+    #which is [194:293] in Python; written out by hand here rather than recomputed from the function's own rounding
+    from preprocess_dbs.epoch import average_condition
+    data = np.random.default_rng(4).normal(size=(30, 3, 4977)) #30 epochs, 3 channels, a single's epoch length
+    evoked = average_condition(_epochs(data))
+    step1 = data - data.mean(axis=2, keepdims=True)
+    step2 = step1.mean(axis=0)
+    step3 = step2 - step2[:, 194:293].mean(axis=1, keepdims=True)
+    assert evoked.shape == (3, 4977) #channels x time
+    assert np.allclose(evoked, step3)
+
+
+def test_average_condition_cancels_noise():
+    #the same response on every pulse plus fresh noise each time: averaging 400 pulses cuts the noise about 20x
+    from preprocess_dbs.epoch import average_condition
+    t = np.arange(4977) / 48828.125
+    response = np.sin(2 * np.pi * 300 * t) * np.exp(-t / 0.01) #a decaying 300 Hz wiggle, ERNA-like
+    noise = np.random.default_rng(5).normal(scale=1.0, size=(400, 1, 4977))
+    evoked = average_condition(_epochs(response + noise))[0]
+    clean = average_condition(_epochs(np.tile(response, (1, 1, 1))))[0] #the response alone, through the same steps
+    assert np.std(evoked - clean) < 0.1 #one pulse's noise has std 1.0; after averaging, about 1/sqrt(400) = 0.05
