@@ -22,7 +22,7 @@ def make_epochs(raw, tmin=-0.002, tmax= 0.025, event= "stim", baseline=None):
     if n_events == 0: #MNE's own error here is hard to read
         raise ValueError(f'no "{event}" annotations in this Raw, nothing to epoch (no pulses in the window?)')
     events, event_id = mne.events_from_annotations(raw, event_id={event:1})
-    epochs = mne.Epochs(raw, events, event_id, tmin=tmin, tmax=tmax, baseline=baseline, preload=True)
+    epochs = mne.Epochs(raw, events, event_id, tmin=tmin, tmax=tmax, baseline=baseline, preload=True, verbose=False)
     if len(epochs) < n_events: #MNE drops events whose window runs past the start or end of the Raw
         warnings.warn(f"{n_events - len(epochs)} of {n_events} {event} events were too close to the edge of the Raw and were dropped")
     return epochs
@@ -228,5 +228,5 @@ def average_segment(raw, times, labels):
     for condition, tmax in windows.items():
         epochs = make_epochs(labelled, tmin=-0.002, tmax=tmax, event=condition)
         data = average_condition(epochs)
-        out[condition] = mne.EvokedArray(data, epochs.info, tmin=-0.002, nave=len(epochs), comment=condition, verbose=False)
+        out[condition] = mne.EvokedArray(data, epochs.info, tmin=-0.002, nave=len(epochs), comment=condition)
     return out
