@@ -56,7 +56,12 @@ def rest_window(times, impedance_times=()):
         start = max(impedance_times) + 9 # 9 seconds after the last impedance check
 
     #2 too little time before first pulse? no rest
-    first = times[0]
+    #TDT logs a fake pulse at exactly t=0 that the lab drops (preprocess.m:217) and clean_dbs keeps, so skip it
+    times = np.asarray(times)
+    real = times[times > 0]
+    if len(real) == 0:
+        raise ValueError("no pulses after t=0, so there's no first pulse to end rest at")
+    first = real[0]
     if first <= start + 3:
         return None
 
@@ -82,6 +87,7 @@ def mark_bad_stim_contact(raw, segment, stim_lead):
     Marks the stimulated contact bad in raw. Sarah dropped it by row position (preprocess.m:228-243): if a lower contact
     was do-not-use, the rows shift and she drops the wrong one. This function finds it by name instead
     """
+    raw = raw.copy() #like the other steps, don't change the caller's raw (marking stim2 then stim3 would leave both bad)
     name = stim_contact(segment, stim_lead) # get the name from stim_contact, e.g. lead1_c2
     if name not in raw.ch_names: # channel not found in the recording at all
         raise ValueError(f"no channel {name} in the recording; is stim_lead={stim_lead} correct and was lead {stim_lead} working/loaded?")

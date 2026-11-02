@@ -165,3 +165,23 @@ def test_detrend_keeps_original_and_annotations():
     out = detrend_segment(raw)
     assert np.array_equal(raw.get_data(), before) #the original isn't changed
     assert list(out.annotations.description) == ["stim"] and np.allclose(out.annotations.onset, [0.5])
+
+
+def test_rest_ignores_tdts_fake_pulse_at_zero():
+    #clean_dbs keeps TDT's fake pulse at t=0 (the lab drops it, preprocess.m:217); rest still ends before the real first pulse
+    times = np.concatenate([[0.0], _pulses()]) #real pulses start at 10 s
+    assert rest_window(times) == pytest.approx((1.0, 9.5))
+
+
+def test_rest_without_real_pulses_says_so():
+    with pytest.raises(ValueError, match="no pulses after t=0"):
+        rest_window([0.0])
+
+
+def test_mark_bad_stim_contact_leaves_input_alone():
+    #marking stim2, then stim3 from the same raw, must not leave c2 bad in the stim3 copy
+    raw = _lead1()
+    stim2 = mark_bad_stim_contact(raw, "stim2", 1)
+    stim3 = mark_bad_stim_contact(raw, "stim3", 1)
+    assert raw.info["bads"] == []
+    assert stim2.info["bads"] == ["lead1_c2"] and stim3.info["bads"] == ["lead1_c3"]

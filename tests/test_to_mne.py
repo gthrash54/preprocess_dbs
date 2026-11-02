@@ -134,3 +134,31 @@ def test_unplaced_ecog_strip_becomes_bad(tmp_path):
     with h5py.File(path, "a") as f:
         f["streams"]["ecos"]["channel_dnu"][1] = 1 #now also do-not-use
     assert to_mne(path, "ecos", 0, 1).info["bads"] == ["ecog_p1"] #listed once, not twice
+
+
+def test_tdt_emg_without_groups_is_typed_emg(tmp_path):
+    #clean_dbs writes no channel groups for TDT's emgg, only the stream type; without that it would load as misc, and
+    #downsample_emg would refuse it and detrend would skip it
+    path = tmp_path / "block.h5"
+    with h5py.File(path, "w") as f:
+        g = f.create_group("streams").create_group("emgg")
+        g.create_dataset("data", data=np.zeros((2, 100), dtype=np.float32))
+        g.create_dataset("channels", data=np.array([1, 2]))
+        g.attrs["fs"] = 1000.0
+        g.attrs["type"] = "emg"
+    assert to_mne(path, "emgg", 0, 0.1).get_channel_types() == ["emg", "emg"]
+
+
+def test_unused_lead_is_named_and_bad(tmp_path):
+    #a lead never implanted: clean_dbs group lead2_not_implanted. Named lead2_c<k> like any lead contact, but marked bad
+    path = tmp_path / "block.h5"
+    _fake_cleaned(path)
+    with h5py.File(path, "a") as f:
+        g = f["streams"]["ecos"]
+        g.create_dataset("channel_group", data=np.array(["ecog_anterior", "ecog_posterior", "lead1", "lead2_not_implanted"], dtype="S"))
+        g.create_dataset("channel_contact", data=np.array(["1", "1", "1", "3"], dtype="S"))
+        g.create_dataset("channel_dnu", data=np.zeros(4, dtype=np.int8))
+        g.attrs["dnu_list"] = "lab sheet: x.xlsx"
+    raw = to_mne(path, "ecos", 0, 1)
+    assert raw.ch_names[3] == "lead2_c3"
+    assert raw.info["bads"] == ["lead2_c3"]

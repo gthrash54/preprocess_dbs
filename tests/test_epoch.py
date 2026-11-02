@@ -2,6 +2,7 @@ import h5py
 import warnings
 import numpy as np
 import pytest
+import mne
 from pathlib import Path
 
 
@@ -132,3 +133,60 @@ def test_uh3021_matches_the_lab():
         epochs = mne.Epochs(raw, np.array([[int(0.3 * fs), 0, 1]]), tmin=-0.002, tmax=windows[label], baseline=None, verbose=False)
         assert len(epochs.times) == n, label
     assert lab["single"] == 4977 and lab["paired_0.45_1"] == 4984 and lab["burst_1"] == 469 #the spec's own examples
+
+
+def _three_pulses(extra=False):
+    #1 s of zeros at 1 kHz with stim pulses at 0.1, 0.2 and 0.3 s (and optionally a non-stim marker at 0.25 s)
+    raw = mne.io.RawArray(np.zeros((1, 1000)), mne.create_info(["lead1_c2"], 1000.0, "dbs"), verbose=False)
+    onsets, names = [0.1, 0.2, 0.3], ["stim"] * 3
+    if extra:
+        onsets, names = onsets + [0.25], names + ["impedance"]
+    raw.set_annotations(mne.Annotations(onset=onsets, duration=0, description=names))
+    return raw
+
+
+def test_label_pulses_names_by_condition_and_drops_unlabelled():
+    from preprocess_dbs.epoch import label_pulses
+    raw = _three_pulses()
+    out = label_pulses(raw, ["single", "", "burst_1"])
+    assert list(out.annotations.description) == ["single", "burst_1"]
+    assert np.allclose(out.annotations.onset, [0.1, 0.3])
+    assert list(raw.annotations.description) == ["stim"] * 3 #the original isn't changed
+
+
+def test_label_pulses_keeps_other_annotations():
+    #only the stim pulses are relabelled; a different marker stays where it was, in time order
+    from preprocess_dbs.epoch import label_pulses
+    out = label_pulses(_three_pulses(extra=True), ["single", "single", "burst_1"])
+    assert list(out.annotations.description) == ["single", "single", "impedance", "burst_1"]
+    assert np.allclose(out.annotations.onset, [0.1, 0.2, 0.25, 0.3])
+
+
+def test_label_pulses_count_must_match():
+    from preprocess_dbs.epoch import label_pulses
+    with pytest.raises(ValueError, match=r"\(3\) does not match the number of labels \(2\)"):
+        label_pulses(_three_pulses(extra=True), ["single", "single"]) #3 stim pulses (the extra marker isn't counted)
+
+
+def test_label_pulses_then_epoch_one_condition():
+    #end to end: after labelling, make_epochs cuts only the condition asked for
+    from preprocess_dbs.epoch import label_pulses, make_epochs
+    out = label_pulses(_three_pulses(), ["single", "burst_1", "single"])
+    epochs = make_epochs(out, tmin=-0.002, tmax=0.05, event="single")
+    assert len(epochs) == 2
+    assert np.allclose(epochs.events[:, 0] / 1000.0, [0.1, 0.3]) #the two singles, not the burst
+
+
+def test_label_pulses_after_crop_keeps_times_and_spans():
+    #a Raw that doesn't start at sample 0 (cropped): pulses must stay on their samples, and a BAD_ span keeps its length
+    from preprocess_dbs.epoch import label_pulses
+    raw = mne.io.RawArray(np.zeros((1, 5000)), mne.create_info(["lead1_c2"], 1000.0, "dbs"), verbose=False)
+    raw.set_meas_date(0)
+    raw.set_annotations(mne.Annotations(onset=[1.0, 2.0, 2.5, 3.0], duration=[0, 0, 1.0, 0],
+                                        description=["stim", "stim", "BAD_seg", "stim"], orig_time=raw.info["meas_date"]))
+    raw.crop(tmin=0.5)
+    before = mne.events_from_annotations(raw, event_id={"stim": 1}, verbose=False)[0][:, 0]
+    out = label_pulses(raw, ["single", "single", "single"])
+    after = mne.events_from_annotations(out, event_id={"single": 1}, verbose=False)[0][:, 0]
+    assert list(after) == list(before)
+    assert out.annotations.duration[list(out.annotations.description).index("BAD_seg")] == 1.0

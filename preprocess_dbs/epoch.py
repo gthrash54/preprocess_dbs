@@ -144,3 +144,37 @@ def condition_windows(times, labels, max_gap=2.0):
     if missing:
         warnings.warn(f"no window for {missing}: none of their pulses has a next pulse within max_gap ({max_gap} s)")
     return windows
+
+def label_pulses(raw, labels, event="stim"):
+    """
+    Renames each stim pulse to its condition, so make_epochs can cut one condition at a time
+    Input:
+    raw: one segment's MNE Raw from to_mne, its pulses annotations called event ("stim"), in time order
+    labels: one label per pulse in this segment, same order (classify_pulses labels for the segment's rows, e.g.
+        labels[idx] from split_by_stim_contact); "" = unlabelled, and that pulse is left out. classify_pulses and
+        split_by_stim_contact must have run on the same pulse table as to_mne's annotations (same voice and
+        confirmed_only): the count check catches a different number of pulses, not the same number shifted
+    event: which annotations are the pulses (default "stim"); any other annotations are kept as they are
+    Returns: a copy of raw whose pulses are named by condition ("single", "burst_3", ...), at the same times
+    """
+    raw = raw.copy()
+    is_pulse = np.asarray(raw.annotations.description) == event #only the pulses get relabelled
+    if is_pulse.sum() != len(labels):
+        raise ValueError(f"The number of {event} annotations ({is_pulse.sum()}) does not match the number of labels "
+                         f"({len(labels)}). The labels could land on the wrong pulses")
+    keep = np.asarray(labels) != ""
+    labels = np.asarray(labels)[keep]
+    onsets = np.asarray(raw.annotations.onset)[is_pulse][keep]
+    #the other annotations, unchanged, plus the relabelled pulses, back in time order
+    other = raw.annotations[~is_pulse]
+    all_onsets = np.concatenate([other.onset, onsets])
+    all_names = np.concatenate([other.description, labels])
+    all_durations = np.concatenate([other.duration, np.zeros(len(onsets))]) #e.g. a BAD_ span keeps its length
+    all_ch_names = list(other.ch_names) + [()] * len(onsets)
+    order = np.argsort(all_onsets, kind="stable")
+    #orig_time kept, so onsets stay on the same clock (else a Raw that doesn't start at sample 0, e.g. after crop, shifts)
+    new_annotations = mne.Annotations(onset=all_onsets[order], duration=all_durations[order], description=all_names[order],
+                                      orig_time=raw.annotations.orig_time, ch_names=[all_ch_names[i] for i in order])
+    raw.set_annotations(new_annotations)
+    return raw
+

@@ -34,6 +34,7 @@ def to_mne(h5_path, stream, t1, t2, voice=None, confirmed_only=True):
         #1 = the lab marked this channel do not use; dnu_list says where the list came from ("none" = recording not listed)
         dnu = g["channel_dnu"][:] if "channel_dnu" in g else None
         listed = g.attrs.get("dnu_list", "")
+        stream_type = str(g.attrs.get("type", "")) #lfp, emg, ...: the only clue for TDT EMG, which has no channel groups
         start = g.attrs.get("start_time", 0.0) #seconds into the recording of this stream's first sample (usually 0)
         n = g["data"].shape[1]
         i0 = int((t1 - start) * fs) # time x fs = samples
@@ -42,14 +43,16 @@ def to_mne(h5_path, stream, t1, t2, voice=None, confirmed_only=True):
             raise ValueError(f"window {t1}-{t2} s is outside this stream ({start:.3f}-{start + n / fs:.3f} s)")
         data = g["data"][:,i0:i1] # all data between set times
     names = [standard_name(n, grp, c) for n, grp, c in zip(names, groups, contacts)]
-    types = [channel_type(n, grp) for n, grp in zip(names, groups)]
+    types = [channel_type(n, grp, stream_type) for n, grp in zip(names, groups)]
     info = mne.create_info(names, fs, types)
     raw = mne.io.RawArray(data, info)
     if dnu is not None:
         raw.info["bads"] = [name for name, flag in zip(names, dnu) if flag == 1]
-    #clean_dbs puts a strip that wasn't placed on the brain in group ecog_<side>_not_placed; its channels are still typed
-    #ecog, so mark them bad too, or ECoG pairs and averages would be made from contacts recording nothing
-    unplaced = [name for name, grp in zip(names, groups) if grp.endswith("_not_placed") and name not in raw.info["bads"]]
+    #clean_dbs puts a strip that wasn't placed on the brain in group ecog_<side>_not_placed, and a lead that was never
+    #implanted or never plugged in in lead<N>_not_implanted / _not_connected; their channels are still typed ecog or dbs,
+    #so mark them bad too, or pairs and averages would be made from contacts recording nothing
+    unused = ("_not_placed", "_not_implanted", "_not_connected")
+    unplaced = [name for name, grp in zip(names, groups) if grp.endswith(unused) and name not in raw.info["bads"]]
     raw.info["bads"] = raw.info["bads"] + unplaced
     if dnu is None:
         warnings.warn(f"{Path(h5_path).name} {stream}: no do-not-use flags (cleaned before clean_dbs version 7), so bad channels aren't marked")
@@ -72,16 +75,17 @@ def standard_name(name, group, contact):
     #every rig names lead contacts its own way (TDT "lead1_c2", BrainVision "DBS2"); the cleaned file's group and contact say
     #which lead and contact it really is, so the rest of the pipeline only ever sees one name per contact
     if group.startswith("lead") and contact.isdigit():
-        return f"{group}_c{contact}"
+        return f"{group.split('_')[0]}_c{contact}" #lead2_not_implanted is still lead2_c3 (and marked bad)
     return name
 
 
-def channel_type(name, group):
-    #MNE channel type from the cleaned file's channel group (falls back to the name for files without groups)
+def channel_type(name, group, stream_type=""):
+    #MNE channel type from the cleaned file's channel group (falls back to the stream's type, then the name, for files
+    #without groups: TDT's emgg stream has none, so its channels would otherwise be misc)
     if group.startswith("ecog") or name.startswith("ecog"):
         return "ecog"
     if group.startswith("lead") or group == "dbs" or name.startswith(("lead", "dbs")):
         return "dbs"
-    if group == "emg":
+    if group == "emg" or (not group and stream_type == "emg"):
         return "emg"
     return "misc"
