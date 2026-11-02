@@ -2,7 +2,7 @@ import warnings
 import numpy as np
 import pytest
 import mne
-from preprocess_dbs.segment import split_by_stim_contact, rest_window, stim_contact, mark_bad_stim_contact
+from preprocess_dbs.segment import split_by_stim_contact, rest_window, stim_contact, mark_bad_stim_contact, detrend_segment
 
 def _pulses(n=5,start=10.0, gaps=(5.0,5.0), spacing = 0.05):
     #fake block of n pulses per contact with long pause for cable move simulation in between pulses. This is to test segment.py
@@ -132,3 +132,36 @@ def test_wrong_stim_lead_raises():
     #stim_lead=2 but only lead 1 was loaded: stop instead of silently marking nothing
     with pytest.raises(ValueError, match="lead2_c2"):
         mark_bad_stim_contact(_lead1(), "stim2", 2)
+
+
+def _drifting(seconds=2.0, fs=1000.0):
+    #two channels: the same 10 Hz sine (20 whole cycles), each on its own straight-line drift
+    t = np.arange(int(seconds * fs)) / fs
+    sine = np.sin(2 * np.pi * 10 * t)
+    data = np.vstack([sine + 5 * t + 2, sine - 3 * t]) #different slopes and offsets
+    raw = mne.io.RawArray(data, mne.create_info(["lead1_c2", "lead1_c3"], fs, "dbs"), verbose=False)
+    raw.set_annotations(mne.Annotations(onset=[0.5], duration=[0], description=["stim"]))
+    return raw, t, sine
+
+
+def test_detrend_removes_each_channels_own_line():
+    #the lab's detrend(x, 1) per channel over the whole segment (preprocess.m:828-846)
+    raw, t, sine = _drifting()
+    out = detrend_segment(raw).get_data()
+    expected = sine - np.polyval(np.polyfit(t, sine, 1), t) #the sine minus its own (tiny) best-fit line
+    assert np.allclose(out[0], expected) and np.allclose(out[1], expected) #both slopes gone, the sine kept
+
+
+def test_detrend_twice_is_the_same_as_once():
+    #once the line is gone there's no line left to remove: detrending again changes nothing
+    raw, _, _ = _drifting()
+    once = detrend_segment(raw)
+    assert np.allclose(detrend_segment(once).get_data(), once.get_data())
+
+
+def test_detrend_keeps_original_and_annotations():
+    raw, _, _ = _drifting()
+    before = raw.get_data().copy()
+    out = detrend_segment(raw)
+    assert np.array_equal(raw.get_data(), before) #the original isn't changed
+    assert list(out.annotations.description) == ["stim"] and np.allclose(out.annotations.onset, [0.5])

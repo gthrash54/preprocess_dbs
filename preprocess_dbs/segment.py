@@ -1,19 +1,21 @@
 import warnings
 import numpy as np
+import scipy.signal
 
 
 def split_by_stim_contact(times, gap_s = 3.0):
     """
-    Input: 
+    Input:
     times: pulse onsets in s from the start of the recording (from stim_times)
     gap_s: a pause longer than this means the operator moved the stim cable to a new contact
     Returns:
-    {"stim2":(t1,t2,idx), "stim3":..., "stim4":...; where stim2/3/4 is contact the cable was on.}
+    {"stim2": (t1, t2, idx), "stim3": ..., "stim4": ...}
+        stim2/3/4 = the contact the cable was on; t1, t2 = the segment's data window in s; idx = that contact's pulse rows
     """
     times = np.asarray(times)
     gaps = np.diff(times) # the pause after each pulse
     moves = np.flatnonzero(gaps > gap_s) # pulses followed by a cable move based on gap_s
-    moves = moves[moves > 0]
+    moves = moves[moves > 0] # ignore a pause right after the first pulse (the lab's idx(idx > 1); numpy counts from 0)
     if len(moves) < 2:
         raise ValueError(f"found {len(moves)} cable moves (pauses > {gap_s} s), expected 2 (stim2 to stim3 and stim3 to stim4); "
                          "can't tell which pulses belong to which contact")
@@ -43,12 +45,12 @@ def rest_window(times, impedance_times=()):
     """
     Input:
     times: pulse onsets in s (from stim_times)
-    impedance_times: when impedance checks happened in this block, in s(empty if none)
-    Returns: (t1,t2) of the rest window in s, or None if there isnt enough time before the first pulse
+    impedance_times: when impedance checks happened in this block, in s (empty if none)
+    Returns: (t1, t2) of the rest window in s, or None if there isn't enough time before the first pulse
     """
     #1 where rest starts: 1s in or 9s after the last impedance check
     #lab: preprocess.m:364-390, only the else branch ever runs (its comments describe the dead branch)
-    if len(impedance_times) ==0:
+    if len(impedance_times) == 0:
         start = 1 # 1 second in
     else:
         start = max(impedance_times) + 9 # 9 seconds after the last impedance check
@@ -66,10 +68,10 @@ def stim_contact(segment, stim_lead):
     """
     Input:
     segment: "stim2", "stim3", or "stim4" (from split_by_stim_contact)
-    stim_lead: the lead being stimulated, 1 or 2(from the block's stim contacts, not from experiment name)
+    stim_lead: the lead being stimulated, 1 or 2 (from the block's stim contacts, not from experiment name)
     Returns:
-    the stimulated contacts channel name (lead1_c2)
-     """
+    the stimulated contact's channel name (e.g. lead1_c2)
+    """
     contact = segment[4:]
     name = f"lead{stim_lead}_c{contact}"
     return name
@@ -77,13 +79,26 @@ def stim_contact(segment, stim_lead):
 
 def mark_bad_stim_contact(raw, segment, stim_lead):
     """
-    Marks the stimulated contact bad in raw. Sarah dropped it by row position (preprocess.m 228-243), so a do not use
-    contact below it shifts which one goes. this fx finds it by name instead
+    Marks the stimulated contact bad in raw. Sarah dropped it by row position (preprocess.m:228-243): if a lower contact
+    was do-not-use, the rows shift and she drops the wrong one. This function finds it by name instead
     """
-    name = stim_contact(segment, stim_lead) #asking stim contact for the name ie lead1_c2
+    name = stim_contact(segment, stim_lead) # get the name from stim_contact, e.g. lead1_c2
     if name not in raw.ch_names: # channel not found in the recording at all
-        raise ValueError(f"no channel {name} in the recording; is stim_lead= {stim_lead} correct and was lead {stim_lead} working/loaded")
+        raise ValueError(f"no channel {name} in the recording; is stim_lead={stim_lead} correct and was lead {stim_lead} working/loaded?")
     if name not in raw.info["bads"]:
         raw.info["bads"].append(name)
     return raw
 
+
+def detrend_segment(raw):
+    """
+    Fits and removes a straight line from each channel over one whole segment, to remove electrode drift (voltage creep
+    from electrode polarization and amplifier offset). The lab's detrend(x, 1), preprocess.m:828-846
+    Input:
+    raw: one segment's MNE Raw (e.g. stim2), after rereferencing
+    Returns:
+    a copy of raw with each channel's best-fit straight line removed
+    """
+    raw = raw.copy()
+    raw.apply_function(lambda x: scipy.signal.detrend(x, type="linear"))
+    return raw

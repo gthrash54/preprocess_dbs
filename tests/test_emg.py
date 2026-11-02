@@ -1,5 +1,6 @@
 import mne
 import numpy as np
+import pytest
 from preprocess_dbs.emg import downsample_emg
 
 FS = 24414.0625 #TDT's EMG rate (25e6 / 1024)
@@ -47,3 +48,10 @@ def test_noise_above_new_nyquist_is_removed_not_aliased():
 def test_stim_markers_keep_their_times():
     out = downsample_emg(_sine(100))
     assert np.allclose(out.annotations.onset, [0.5, 1.5])
+
+
+def test_non_emg_channels_are_refused():
+    #DBS at TDT's 48.8 kHz must never be downsampled by mistake: ERNA needs the full rate
+    raw = mne.io.RawArray(np.zeros((2, 1000)), mne.create_info(["lead1_c2", "emg_1"], 48828.125, ["dbs", "emg"]), verbose=False)
+    with pytest.raises(ValueError, match="only takes EMG"):
+        downsample_emg(raw)

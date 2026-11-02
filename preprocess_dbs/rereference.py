@@ -137,7 +137,7 @@ def common_average(raw, lead):
     averaged = raw.copy().pick(usable)
     averaged.apply_function(lambda x: x - x.mean(axis=0), channel_wise=False)
 
-    #rename the lead (lead1_c2 to lead1_c2-avg)
+    #rename the channels (lead1_c2 to lead1_c2-avg)
     averaged.rename_channels({name: f"{name}-avg" for name in usable})
     return averaged
 
