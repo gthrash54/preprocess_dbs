@@ -1,17 +1,18 @@
 import numpy as np
+import warnings
 
 
 def refine_peak(signal, idx, half_width=3):
     """
     Finds a peak's position to a fraction of a sample: fits a parabola through the samples around it and returns the
-    parabola's top. The lab's refinePeak (alignsignals_fractional.m). A pulse fires anywhere between two samples, so its
+    parabola's top. Sarah's refinePeak (alignsignals_fractional.m). A pulse fires anywhere between two samples, so its
     artifact peak usually falls between them too; the stim artifact is steep enough that a fraction of a sample matters
     Input:
     signal: one channel's samples, 1-D
     idx: the position of the peak's biggest sample (from the peak finder)
-    half_width: how many samples on each side to fit through (3, as the lab: 7 points)
+    half_width: how many samples on each side to fit through (3, as Sarah: 7 points)
     Returns: the peak's position as a decimal, on the same 0-based count as idx (e.g. 41.8 = between samples 41 and 42).
-        Kept inside the fitted samples: the lab doesn't do this, so a nearly flat stretch could send its peak hundreds of
+        Kept inside the fitted samples: Sarah's code doesn't do this, so a nearly flat stretch could send its peak hundreds of
         samples away and wreck the alignment (open question: confirm with Harrison). idx unchanged when fewer than 3
         samples are left near an edge or the samples lie on a straight line
     """
@@ -23,7 +24,7 @@ def refine_peak(signal, idx, half_width=3):
     if len(range_of_positions) < 3: #a parabola needs at least 3 points
         return idx
     a, b, c = np.polyfit(range_of_positions, values_of_positions, 2) #fits a parabola onto the peak: y = a*x^2 + b*x + c
-    #a straight line has no top. The fit never gives exactly 0 for a, only something tiny from rounding (the lab checks
+    #a straight line has no top. The fit never gives exactly 0 for a, only something tiny from rounding (Sarah's code checks
     #a == 0, so it misses this), and dividing by it puts the "peak" absurdly far away: treat tiny as 0
     if abs(a) <= 1e-12 * np.max(np.abs(values_of_positions)):
         return idx
@@ -33,32 +34,75 @@ def refine_peak(signal, idx, half_width=3):
 
 def find_first_big_deflection(signal, fs, desired_sign=None):
     """
+    Finds the stim artifact's reference peak, used to line the template up with a signal (Sarah's
+    findFirstBigDeflection in alignsignals_fractional.m). The artifact goes up and down more than once, and which of
+    those peaks is biggest can differ between the template and the signal. So instead of the biggest peak, this takes
+    the first big one: the biggest peak, unless there's another peak at least half its size in the 0.4 ms before it
+    Input:
+    signal: one channel's samples, 1-D, lightly smoothed
+    fs: sampling rate in Hz
+    desired_sign: None for the first call; +1 or -1 for the second call, to only look at peaks pointing the same way
+        as the first call's (pass in the sign the first call returned)
+    Returns: (position of the reference peak, its sign: +1 for a peak pointing up, -1 for one pointing down)
     """
-    idx_largest = np.argmax(np.abs(signal)) # find the position of the largest signal ( both positive and negative)
-    
-    if desired_sign == None: #without a desired sign, we continue doing what we wrote above
-        if idx_largest < round(0.2/1000*fs)-1: # if the biggest signal is in the first 9 samples, dont trust it bc its the leftover of first pulse. multiplying by fs gives you sample #
+    #starting guess: the position of the biggest value, up or down
+    idx_largest = np.argmax(np.abs(signal))
+
+    if desired_sign == None:
+        #first call. In short paired-pulse signals, the first pulse's leftover sits in the first 0.2 ms and can be the
+        #biggest value, so ignore that stretch: 0.2 ms = 10 samples in Sarah's 1-based count, the first 9 here
+        if idx_largest < round(0.2/1000*fs)-1:
             idx_largest = np.argmax(abs(signal[(round(0.2/1000*fs)-1):]))
-            idx_largest = idx_largest + (round(0.2/1000*fs)-1)
-        sign_value = np.sign(signal[idx_largest]) #sign of the largest value
+            idx_largest = idx_largest + (round(0.2/1000*fs)-1) #back to a position in the whole signal
+        sign_value = np.sign(signal[idx_largest]) #+1 if the peak points up, -1 if down
     else:
-        mask = np.sign(signal) == desired_sign # if there is a desired sign we look at it
+        #second call: the biggest value pointing the given way (True/False mask -> biggest in the shorter list ->
+        #its position in the whole signal). 
+        mask = np.sign(signal) == desired_sign
         if mask.any()==True:
             rel_idx = np.argmax(np.abs(signal[mask]))
             idx_candidates = np.flatnonzero(mask)
             idx_largest = idx_candidates[rel_idx]
             sign_value =desired_sign
-        else: # if the biggest signal is in the first 9 samples, dont trust it bc its the leftover of first pulse. multiplying by fs gives you sample #
+        else:
+            #nothing points the given way: use the biggest value overall but say so, because the two
+            #signals' reference peaks would then point opposite ways and the alignment would likely be wrong
             idx_largest = np.argmax(np.abs(signal))
-            sign_value = np.sign(signal[idx_largest]) 
-    stretch = signal[max(0,idx_largest - round(0.0004*fs)):(idx_largest+1)]
-    big = np.abs(stretch) >= (np.abs(signal[idx_largest])/2)
+            sign_value = np.sign(signal[idx_largest])
+            warnings.warn(f"no sample points in the desired direction ({int(desired_sign):+d}); using the biggest peak "
+                          f"({int(sign_value):+d}) instead, so the alignment may line up peaks pointing opposite ways")
+
+    #look back: the 0.4 ms before the peak, up to and including it, where an earlier big peak would be
+    search_region_start = max(0,idx_largest - round(0.0004*fs))
+    search_region = signal[search_region_start:(idx_largest+1)]
+    #candidates: at least half the peak's size (and, in the second call, pointing the same way). The last 4 samples
+    #are the peak itself and the samples rising into it, so they can't count as an earlier peak
+    big = np.abs(search_region) >= (np.abs(signal[idx_largest])/2)
     if desired_sign == None:
         candidates = big
     else:
-        candidates = (big) & ((np.sign(stretch) == sign_value))
+        candidates = (big) & ((np.sign(search_region) == sign_value))
     candidates[-4:] = False
+    #keep only candidates that are the top of a peak (or the bottom of a dip): at least as far from zero as the 2
+    #samples on each side, so a point partway up a slope doesn't count. Needs 2 samples on each side to compare with
+    local_peaks = []
+    for i in np.flatnonzero(candidates):
+        if i < 2 or i > len(search_region) - 3:
+            continue
+        if search_region[i] > 0:
+            if (search_region[i] >= search_region[i+1] and search_region[i] >= search_region[i+2] and search_region[i] 
+             >= search_region[i-1] and search_region[i] >= search_region[i-2]):
+                local_peaks.append(i)
+        elif search_region[i] < 0:
+            if (search_region[i] <= search_region[i+1] and search_region[i] <= search_region[i+2] and search_region[i] 
+             <= search_region[i-1] and search_region[i] <= search_region[i-2]):
+                local_peaks.append(i)
 
+    #if there's an earlier peak, the biggest one becomes the reference peak (position back in the whole signal)
+    if local_peaks:
+        peak_height = abs(search_region[local_peaks])
+        peak_max_height = np.argmax(peak_height)
+        max_peak = local_peaks[peak_max_height]
+        idx_largest = search_region_start + max_peak
+        sign_value = np.sign(signal[idx_largest])
     return idx_largest, sign_value
-
-        
