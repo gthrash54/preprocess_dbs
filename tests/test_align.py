@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 from preprocess_dbs.align import refine_peak
 from preprocess_dbs.align import find_first_big_deflection
+from preprocess_dbs.align import align_signals
 
 
 def test_peak_between_samples():
@@ -74,3 +75,23 @@ def test_fallback_warning_for_first_big_deflection():
         position,sign = find_first_big_deflection(signal, 48828.125, desired_sign=-1)
     assert position == 8
     assert sign == 1
+
+
+def test_align_signals_finds_known_shifts():
+    #a smooth artifact-like bump peaking 2 ms in; y is the same bump moved by a known number of samples
+    #np.roll(x, 5) moves everything 5 samples later, so y comes after x and the shift is +5; rolling by -3 gives -3
+    fs = 48828.125
+    t = np.arange(400) / fs
+    x = np.exp(-((t - 0.002) / 0.0001) ** 2)
+    shift, peak_x, peak_y = align_signals(x, np.roll(x, 5), fs)
+    assert shift == pytest.approx(5, abs=0.01)
+    assert peak_y - peak_x == pytest.approx(shift) #the shift is just the gap between the two refined peaks
+    shift, peak_x, peak_y = align_signals(x, np.roll(x, -3), fs)
+    assert shift == pytest.approx(-3, abs=0.01)
+
+
+def test_align_signals_needs_equal_lengths():
+    #x and y must be the same length; one sample short should stop with an error, not give a wrong shift
+    x = np.zeros(400)
+    with pytest.raises(ValueError, match="not equal"):
+        align_signals(x, x[:-1], 48828.125)

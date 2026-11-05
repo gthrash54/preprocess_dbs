@@ -1,5 +1,6 @@
 import numpy as np
 import warnings
+from scipy.signal import butter, sosfiltfilt
 
 
 def refine_peak(signal, idx, half_width=3):
@@ -106,3 +107,49 @@ def find_first_big_deflection(signal, fs, desired_sign=None):
         idx_largest = search_region_start + max_peak
         sign_value = np.sign(signal[idx_largest])
     return idx_largest, sign_value
+
+
+def smooth_signal(signal, fs):
+    """
+    Smooths and filters the artifact using a 4th order Butterworth and 8khz low pass
+    to preserve artifact and remove sample to sample noise. It is zero phase by running forwards and backwards (filtfilt)
+    Input:
+    signal: signal of interest that requires smoothing, likely has already been preprocessed.
+    fs: Sampling frequency, usually 48.8khz
+    Returns: smoothed_signal, the filtered signal of interest
+    """
+    fourth_order_butter = butter(4, 8000,btype="low",fs=fs,output="sos") #4th order Butterworth with a 8khz cutoff with low pass filtering. sos is just the numerically safe output
+    smoothed_signal = sosfiltfilt(sos=fourth_order_butter,x=signal) #zero-phase using filtfilt
+    return smoothed_signal
+def align_signals(signal_x,signal_y,fs):
+    """
+    Measures how far apart the signals are to a fraction of a sample.
+    We first smooth the signals, then find their reference peaks and refine them. Then we subtract them to find the difference. Adapted from alignsignals_fractional.m from Sarah
+    Input:
+    signal_x: the signal we measure against, one channel. Sarah uses it twice:
+        building the template: the single-pulse average
+        removing the artifact: one condition's average (single, burst, probes, or pair minus single)
+    signal_y: the signal compared with x, one channel, same length as signal_x. Its peak is found pointing the same
+        way as x's (both up or both down)
+        building the template: the raw_template output (pp1 - single)
+        removing the artifact: the finished template
+    fs: sampling freq, usually 48.8 kHz
+    Returns:
+    shift: the difference between the two peaks in units of samples (measured to the fraction), with a positive value indicating y following x temporally.
+        e.g. shift = 2.4 means y's peak comes 2.4 samples (about 0.05 ms) after x's
+    refined_x_peak,refined_y_peak: where each signal's reference peak sits, in samples from the start of that signal
+        (a fraction, from the parabola fit on the smoothed signal). shift = refined_y_peak - refined_x_peak
+    """
+    if len(signal_x) != len(signal_y):
+        raise ValueError(f'Length of signal_x ({len(signal_x)}) and signal_y ({len(signal_y)}) are not equal')
+    smoothed_x,smoothed_y = smooth_signal(signal_x,fs), smooth_signal(signal_y,fs)
+    x_reference_peak,x_reference_sign = find_first_big_deflection(smoothed_x,fs)
+    y_reference_peak,y_reference_sign = find_first_big_deflection(smoothed_y, fs, desired_sign = x_reference_sign)
+    refined_x_peak = refine_peak(smoothed_x, x_reference_peak, half_width = 3)
+    refined_y_peak = refine_peak(smoothed_y, y_reference_peak, half_width = 3)
+    shift = refined_y_peak - refined_x_peak #positive means y comes after
+    return shift, refined_x_peak, refined_y_peak
+
+
+
+    
