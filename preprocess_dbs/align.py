@@ -174,3 +174,4 @@ def shift_signal(signal, shift):
     mask = np.isnan(shifted_signal) # returns true/false array where Nans = True
     shifted_signal[mask] = 0 #turns Nans into zeros
     return shifted_signal
+

@@ -1,6 +1,8 @@
 import numpy as np
 from preprocess_dbs.deartifact import raw_template
-
+from preprocess_dbs.deartifact import align_template
+from preprocess_dbs import deartifact
+import pytest
 FS = 48828.125
 
 
@@ -38,3 +40,51 @@ def test_template_per_channel():
     template = raw_template(single, pp1, 22 / FS, FS)
     for ch, (_, _, A) in enumerate(pairs):
         assert np.allclose(template[ch], A[:600 - 22])
+
+
+def test_align_template_known_lags_as_shift():
+    #fake data: 3 channels, each just one smooth peak standing in for the artifact
+    t = np.arange(600.0) #sample numbers 0 to 599
+    lags = [0.0, 1.7, -2.3] #how far each channel's template peak sits from the single pulse's peak, in samples
+    #single pulse: all 3 channels peak at sample 118 (the stim is at sample 98)
+    single = np.array([np.exp(-((t - 118) / 4) ** 2) + t / 6000 for lag in lags])
+    #template: same peak, moved by each channel's lag, so the peaks are at 118, 119.7 and 115.7
+    template = np.array([np.exp(-((t - 118 - lag) / 4) ** 2) + t / 6000 for lag in lags])
+    #(+ t/6000 tilts the signal up slightly; without it pchip warns about dividing by numbers too close to zero)
+    aligned,shifts = align_template(single,template,FS)
+    assert shifts == pytest.approx(lags,abs=0.1)
+    assert aligned.shape == template.shape
+    #the moved template should now sit on top of the single pulse (all peaks back at 118); if the shift went the
+    #wrong way, channels 2 and 3 would end up further off instead
+    assert np.allclose(aligned[:, 100:300], single[:, 100:300], atol=0.05)
+
+
+def test_align_template_leaves_the_input_alone():
+    #align_template fills in a copy; the template passed in should come back exactly as it went in
+    t = np.arange(600.0)
+    single = np.array([np.exp(-((t - 118) / 4) ** 2) + t / 6000])
+    template = np.array([np.exp(-((t - 120) / 4) ** 2) + t / 6000]) #one channel, peak 2 samples late
+    before = template.copy()
+    align_template(single, template, FS)
+    assert np.array_equal(template, before)
+
+
+def test_align_template_measures_on_sarahs_windows(monkeypatch):
+    #checks exactly which windows get measured, with Sarah's recipe (deartifact.m:265-272): start one sample before
+    #the stim (Python 97), demean from there to the END of the epoch, then keep 4.5 ms (220 samples).
+    #monkeypatch swaps align_signals for a stand-in that just writes down what it was given, so we can look at
+    #the windows directly. A window starting at the stim (98), or demeaned after cutting, fails here
+    seen = []
+    def record_windows(x, y, fs):
+        seen.append((x, y))
+        return 0.0, 0.0, 0.0 #a shift of 0, so nothing gets moved
+    monkeypatch.setattr(deartifact, "align_signals", record_windows)
+    rng = np.random.default_rng(0)
+    #2 channels of noise on a slope: on a slope, the mean of the whole tail and the mean of the first 220 samples differ
+    single = rng.normal(size=(2, 600)) + np.linspace(0, 5, 600)
+    template = rng.normal(size=(2, 578)) + np.linspace(0, 5, 578)
+    align_template(single, template, FS)
+    assert len(seen) == 2 #one measurement per channel
+    for ch, (x, y) in enumerate(seen):
+        assert np.allclose(x, (single[ch, 97:] - single[ch, 97:].mean())[:220])
+        assert np.allclose(y, (template[ch, 97:] - template[ch, 97:].mean())[:220])
