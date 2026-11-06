@@ -66,3 +66,39 @@ def align_template(single, template, fs):
         aligned[ch] = shift_signal(template[ch],-shift) #move the whole channel, not just the window, back by the shift
         shifts.append(shift)
     return aligned, np.array(shifts)
+
+
+def blank_template(template,gap_s,fs,blank=True):
+    """
+    Flattens the start of the aligned template: from one sample before the stim through the pair's isi + 0.35 ms, each
+    channel is replaced by its own mean over the 2 ms before the stim. Sarah's deartifact.m:309-314.
+    For pp1 that is about 0.5 ms (gap 0.246 ms, samples 97-121) or 0.7 ms (gap 0.451 ms, samples 97-131).
+
+    Optional (blank=False skips it) because it's open question Q1. Sarah's comment says it blanks the "conditioning
+    pulse region" (the pair's first pulse), but the template has already been shifted back by the gap, so that region
+    now sits before the stim; what gets flattened is the start of the aligned artifact itself, where its largest swing
+    usually is. That can change which deflection the later alignment of each condition locks onto (to check on real
+    data). Her code also averages the epoch's 5-9 ms (3-7 ms after the stim) with the pre-stim mean ("interpolated
+    mean"), then fills with the pre-stim mean alone, so that average has no effect; it may be unfinished.
+    Copied as her code runs; ask Walker, and compare both ways on real data.
+
+    Input:
+    template: the aligned template from align_template, channels x time (the stim at 2 ms)
+    gap_s: time between the pair's two pulses in s (onset to onset, as in raw_template, e.g. 0.000451)
+    fs: sampling freq, usually 48.8 kHz
+    blank: True (default) flattens as Sarah does; False returns the template unchanged
+    Returns: a copy of the template, same shape, with the stretch flattened (or untouched if blank=False)
+    """
+    if not blank:
+        return template.copy() #still a copy, so the caller can change the result without changing their template
+    start = round(0.002*fs)-1 #one sample before the stim (97), the same start as align_template (Sarah's sample 98)
+    isi = gap_s - 0.0001 #Sarah's isi is the gap minus 0.1 ms (parse.m's msafterstim)
+    #how many samples to flatten: the isi, plus 0.35 ms, plus 1 because her start:end range includes both ends
+    #(gap 0.451 ms: 17 + 17 + 1 = 35)
+    length = round(isi*fs) + round(0.00035*fs) +1
+    template = template.copy() #work on a copy so the caller's template isn't changed
+    #fill value: each channel's own mean over samples 0 to start, including start (her 1:98), the 2 ms before the stim.
+    #keepdims keeps it a column (channels x 1), so each row gets its own mean in the next line
+    mean_per_channel = np.mean(template[:,:start+1],axis=1,keepdims=True)
+    template[:,start:start+length] = mean_per_channel #every sample in the stretch becomes its row's mean
+    return template
