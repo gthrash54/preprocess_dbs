@@ -3,6 +3,7 @@ import pytest
 from preprocess_dbs.align import refine_peak
 from preprocess_dbs.align import find_first_big_deflection
 from preprocess_dbs.align import align_signals
+from preprocess_dbs.align import shift_signal
 
 
 def test_peak_between_samples():
@@ -95,3 +96,27 @@ def test_align_signals_needs_equal_lengths():
     x = np.zeros(400)
     with pytest.raises(ValueError, match="not equal"):
         align_signals(x, x[:-1], 48828.125)
+
+
+def test_shift_signal_positive_shift():
+    #tests a time shift to a later time by using a positive shift in shift_signal
+    t = np.arange(200)
+    x = np.exp(-((t-100)/4)**2) # test data that peaks at 100
+    shift,a,b = align_signals((shift_signal(x,2.5)),x, 48000) #returns 3 values, a is the shifted signals location and b is the original location
+    assert a == pytest.approx(102.5, abs=0.1)
+
+def test_shift_signal_with_zeros():
+    #tests a shift that causes the edge to display zeros
+    signal = np.arange(1,11)
+    shifted_signal = shift_signal(signal,3) 
+    assert len(signal) == len(shifted_signal)
+    assert np.all(shifted_signal[:3] ==0)
+    assert signal[0] == shifted_signal[3]
+
+
+def test_shift_signal_shifted_zero():
+    # tests a shift of zero
+    t = np.arange(200)
+    x = np.exp(-((t-100)/4)**2) # test data that peaks at 100
+    shifted_signal = shift_signal(x,0)
+    assert x == pytest.approx(shifted_signal)

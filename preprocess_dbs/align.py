@@ -1,6 +1,7 @@
 import numpy as np
 import warnings
 from scipy.signal import butter, sosfiltfilt
+from scipy.interpolate import PchipInterpolator
 
 
 def refine_peak(signal, idx, half_width=3):
@@ -150,6 +151,26 @@ def align_signals(signal_x,signal_y,fs):
     shift = refined_y_peak - refined_x_peak #positive means y comes after
     return shift, refined_x_peak, refined_y_peak
 
+def shift_signal(signal, shift):
+    """
+    Moves the signal earlier or later in time by any number of samples, including fractions (e.g. 2.5).
+    Uses pchip interpolation to read the signal between samples, as Sarah does in deartifact.m (interp1(..., 'pchip', 0)).
+    Samples that would come from outside the signal become 0, and the output is the same length as the input
+    (e.g. shift = +3 makes the first 3 samples 0).
 
+    Input:
+    signal: one channel as a 1-D array
+    shift: how far the channel needs moved (in samples), with positive numbers shifting the signal later.
 
-    
+    Returns: 
+    shifted_signal: original signal that has been shifted earlier or later in time.
+    """
+
+    n_positions = np.arange(len(signal))
+    #interpolates values in-between samples (2.5). Pchip draws its interpolation curve using its value and slope to prevent dip/ripples.
+    curve = PchipInterpolator(n_positions,signal, extrapolate=False) # reads the curve at the designated positions i ask
+    read_positions = n_positions - shift # positions of interests
+    shifted_signal = curve(read_positions) # shifted signal, but includes Nans instead of 0
+    mask = np.isnan(shifted_signal) # returns true/false array where Nans = True
+    shifted_signal[mask] = 0 #turns Nans into zeros
+    return shifted_signal
