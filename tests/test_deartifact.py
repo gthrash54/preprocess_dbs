@@ -1,6 +1,7 @@
 import numpy as np
 from preprocess_dbs.deartifact import raw_template
 from preprocess_dbs.deartifact import align_template
+from preprocess_dbs.deartifact import blank_template
 from preprocess_dbs import deartifact
 import pytest
 FS = 48828.125
@@ -88,3 +89,30 @@ def test_align_template_measures_on_sarahs_windows(monkeypatch):
     for ch, (x, y) in enumerate(seen):
         assert np.allclose(x, (single[ch, 97:] - single[ch, 97:].mean())[:220])
         assert np.allclose(y, (template[ch, 97:] - template[ch, 97:].mean())[:220])
+
+
+def test_blank_template_flattens_sarahs_stretch():
+    #Sarah's two pp1 gaps: 0.451 ms flattens samples 97-131, 0.246 ms flattens 97-121 (deartifact.m:309-314).
+    #inside the stretch each channel becomes its own mean of samples 0-97; everything outside stays as it was
+    rng = np.random.default_rng(0)
+    template = rng.normal(size=(2, 400)) + np.array([[5.0], [-3.0]]) #2 channels of noise around different levels
+    for gap_s, last in ((0.000451, 131), (0.000246, 121)):
+        blanked = blank_template(template, gap_s, FS)
+        changed = np.flatnonzero(np.any(blanked != template, axis=0)) #which samples (columns) were changed
+        assert changed[0] == 97
+        assert changed[-1] == last
+        assert len(changed) == last - 97 + 1 #one unbroken stretch, no gaps
+        for ch in range(2):
+            assert np.allclose(blanked[ch, 97:last + 1], template[ch, :98].mean())
+
+
+def test_blank_template_can_be_switched_off():
+    #blank=False gives the template back unchanged; in both modes the caller's template is never modified
+    rng = np.random.default_rng(1)
+    template = rng.normal(size=(2, 400))
+    before = template.copy()
+    unblanked = blank_template(template, 0.000451, FS, blank=False)
+    assert np.array_equal(unblanked, template)
+    assert not np.shares_memory(unblanked, template) #a separate copy, not the caller's array handed back
+    blank_template(template, 0.000451, FS)
+    assert np.array_equal(template, before)
