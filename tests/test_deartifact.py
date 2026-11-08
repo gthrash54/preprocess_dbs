@@ -2,6 +2,8 @@ import numpy as np
 from preprocess_dbs.deartifact import raw_template
 from preprocess_dbs.deartifact import align_template
 from preprocess_dbs.deartifact import blank_template
+from preprocess_dbs.deartifact import subtract_template
+from preprocess_dbs.align import shift_signal
 from preprocess_dbs import deartifact
 import pytest
 FS = 48828.125
@@ -116,3 +118,64 @@ def test_blank_template_can_be_switched_off():
     assert not np.shares_memory(unblanked, template) #a separate copy, not the caller's array handed back
     blank_template(template, 0.000451, FS)
     assert np.array_equal(template, before)
+
+
+def _bump(t, at):
+    #a smooth stand-in artifact peaking at sample `at`, on a slight tilt (keeps pchip from warning about tiny numbers)
+    return np.exp(-((t - at) / 4) ** 2) + t / 6000
+
+
+def test_subtract_template_removes_the_artifact_and_keeps_the_response():
+    #a single-pulse condition: artifact peaking at 119.6 plus a "brain response" starting at sample 250. The
+    #template's artifact peaks at 118, 1.6 samples EARLIER, so the shift is about -1.6 and the data moves back onto it
+    t = np.arange(600.0)
+    response = np.where(t > 250, 0.05 * np.sin((t - 250) / 8), 0.0)
+    data = np.array([_bump(t, 119.6) + response])
+    template = np.array([_bump(t, 118)])
+    before = data.copy()
+    clean, shifts, peaks = subtract_template(data, template, FS)
+    assert shifts == pytest.approx([-1.6], abs=0.1)
+    assert np.abs(clean[0, 100:200]).max() < 0.03 #the artifact (peak 1) is gone, about 1% left
+    #the response is still there, moved by the same shift as the data (it's the data that moves, not the template;
+    #if the template were moved instead, the response would sit 1.6 samples off and fail this)
+    assert np.allclose(clean[0, 300:550], shift_signal(response, shifts[0])[300:550], atol=0.002)
+    #the data's artifact peak in Sarah's window, before moving: 119.6 - 97 (the window start) = 22.6
+    assert peaks == pytest.approx([22.6], abs=0.1)
+    assert np.array_equal(data, before) #the caller's data isn't changed
+
+
+def test_subtract_template_pair_subtracts_the_single_first():
+    #for a pair, subtract_template should do exactly raw_template (pair minus single, shifted back by the gap) and then
+    #the same alignment and subtraction as for any other condition. The result is the gap (22 samples) shorter
+    t = np.arange(600.0)
+    single = np.array([_bump(t, 118)])
+    #the pair's second pulse: its own artifact 22 samples (0.451 ms) after the first, plus its own response
+    second_response = np.where(t > 272, 0.05 * np.sin((t - 272) / 8), 0.0)
+    pair = single + np.array([_bump(t, 140) + second_response])
+    template = np.array([_bump(t, 118)])
+    clean_pair, shifts, peaks = subtract_template(pair, template, FS, single=single, gap_s=22 / FS)
+    by_hand, _, _ = subtract_template(raw_template(single, pair, 22 / FS, FS), template, FS)
+    assert clean_pair.shape == (1, 600 - 22)
+    assert np.allclose(clean_pair, by_hand)
+    #checked independently too: what's left is the second pulse's response, moved back 22 samples to start at 250
+    #(plus a constant 22/6000, because the second pulse's tilt sits 22 samples further along than the template's)
+    t_left = t[:600 - 22]
+    expected = np.where(t_left > 250, 0.05 * np.sin((t_left - 250) / 8), 0.0) + 22 / 6000
+    assert np.allclose(clean_pair[0], expected)
+
+
+def test_subtract_template_with_different_lengths():
+    #Sarah's lines 471-480: only the samples both have get the template subtracted; extra data samples are kept, and a
+    #longer template is cut to the data's length. The output is always as long as the data
+    t = np.arange(600.0)
+    response = np.where(t > 250, 0.05 * np.sin((t - 250) / 8), 0.0)
+    data = np.array([_bump(t, 118) + response])
+    short_template = np.array([_bump(t, 118)[:500]]) #artifacts line up exactly, so nothing gets moved
+    clean, _, _ = subtract_template(data, short_template, FS)
+    assert clean.shape == (1, 600)
+    assert np.allclose(clean[0, :500], response[:500]) #template subtracted where it exists
+    assert np.allclose(clean[0, 500:], data[0, 500:]) #past its end, the data is kept as it was
+    clean_short, _, _ = subtract_template(data[:, :450], np.array([_bump(t, 118)]), FS)
+    assert clean_short.shape == (1, 450) #a longer template is cut to the data's length
+    assert np.allclose(clean_short[0], response[:450]) #and still subtracted all the way to the data's last sample
+

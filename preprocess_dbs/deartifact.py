@@ -28,14 +28,43 @@ def raw_template(single, pp1, gap_s, fs):
     return first_pulse_artifact
 
 
+def _measure_shift(x, y, fs):
+    """
+    Measures how far y's artifact sits from x's, one channel at a time, on Sarah's window (deartifact.m:265-276 and
+    420-431, the same recipe both times): from one sample before the stim to the end of the epoch, demean each signal
+    over that whole stretch, keep the first 4.5 ms, then align_signals. Shared by align_template and the template
+    subtraction so the window is written once and can't drift apart between the two.
+
+    Input:
+    x: one channel, 1-D, the signal measured against (the stim at 2 ms)
+    y: one channel, 1-D, the signal compared with x (the stim at 2 ms). x and y can differ in length; both windows are
+        4.5 ms long
+    fs: sampling freq, usually 48.8 kHz
+    Returns: what align_signals returns, on the windows: shift (samples, can be a fraction; positive = y is later),
+        x's peak and y's peak (positions within the window, counted from the window start)
+    """
+    #start of the window, one sample before the stim. Epochs begin 2 ms before the stim, so the stim is at
+    #round(0.002*fs) = 98; Sarah starts at MATLAB sample 98, which is Python 97 (MATLAB counts from 1). It matters
+    #because find_first_big_deflection ignores the first 0.2 ms counted from this start
+    start = round(0.002*fs) - 1
+    n_window = round(0.0045*fs) #window length: 4.5 ms (220 samples), where the artifact is
+    #each signal from the window start to the end of the epoch
+    x_tail = x[start:]
+    y_tail = y[start:]
+    #Sarah's order: demean over that whole stretch FIRST, then keep only the 4.5 ms window. The mean decides which
+    #peak looks biggest, so demeaning after cutting can pick a different peak
+    x_window = (x_tail - np.mean(x_tail))[:n_window]
+    y_window = (y_tail - np.mean(y_tail))[:n_window]
+    return align_signals(x_window, y_window, fs)
+
+
 def align_template(single, template, fs):
     """
     Slides the artifact template in time, channel by channel, until its artifact sits directly on top of the single
     pulse's artifact, so it can be subtracted without leaving a leftover spike. Sarah's deartifact.m (about lines 263-299).
-    Per channel, in Sarah's order (deartifact.m:265-272): take both signals from one sample before the stim to the end
-    of the epoch, demean each over that whole stretch, then keep the first 4.5 ms; measure the shift on those windows
-    with align_signals, then move the whole template channel by -shift (the template is `shift` samples later than the
-    single, so it has to move back by that much).
+    Per channel: measure the shift on Sarah's window with _measure_shift (from one sample before the stim, demeaned to
+    the end of the epoch, first 4.5 ms kept), then move the whole template channel by -shift (the template is `shift`
+    samples later than the single, so it has to move back by that much).
 
     Input:
     single: the single-pulse average, channels x time (the stim at 2 ms)
@@ -47,22 +76,10 @@ def align_template(single, template, fs):
         the single's and was moved earlier
     """
     aligned = template.copy() #a copy, so filling it in below doesn't change the caller's template
-    #start of the window, one sample before the stim. Epochs begin 2 ms before the stim, so the stim is at
-    #round(0.002*fs) = 98; Sarah starts at MATLAB sample 98, which is Python 97 (MATLAB counts from 1). It matters
-    #because find_first_big_deflection ignores the first 0.2 ms counted from this start
-    start = round(0.002*fs) - 1
-    n_window = round(0.0045*fs) #window length: 4.5 ms (220 samples), where the artifact is
     shifts = [] #one shift per channel, filled in by the loop
     for ch in range(template.shape[0]):
-        #this channel from the window start to the end of the epoch
-        single_tail = single[ch, start:]
-        template_tail = template[ch, start:]
-        #Sarah's order: demean over that whole stretch FIRST, then keep only the 4.5 ms window. The mean decides which
-        #peak looks biggest, so demeaning after cutting can pick a different peak
-        single_window = (single_tail - np.mean(single_tail))[:n_window]
-        template_window = (template_tail - np.mean(template_tail))[:n_window]
         #how far the template's artifact is from the single's (positive = the template is later)
-        shift, aligned_single_peak, aligned_template_peak = align_signals(single_window,template_window,fs)
+        shift, single_peak, template_peak = _measure_shift(single[ch], template[ch], fs)
         aligned[ch] = shift_signal(template[ch],-shift) #move the whole channel, not just the window, back by the shift
         shifts.append(shift)
     return aligned, np.array(shifts)
@@ -102,3 +119,50 @@ def blank_template(template,gap_s,fs,blank=True):
     mean_per_channel = np.mean(template[:,:start+1],axis=1,keepdims=True)
     template[:,start:start+length] = mean_per_channel #every sample in the stretch becomes its row's mean
     return template
+
+
+def subtract_template(data,template, fs, single=None, gap_s=None):
+    """
+    Removes the stim artifact from one condition's average by subtracting the finished template, leaving the brain
+    response. Sarah's deartifact.m:350-480.
+    1. Pairs only (single and gap_s given): subtract the single pulse and shift back by the gap (raw_template), so what
+       is left is the second pulse's artifact + response, starting at the stim like everything else. Singles, bursts
+       and probes are used as they are.
+    2. Per channel: measure the shift on Sarah's window (_measure_shift, data as x, template as y) and move the DATA
+       onto the template by +shift (the opposite of align_template, which moves the template). The brain response
+       moves with it, by a fraction of a sample.
+    3. Subtract the template over the samples both have; any extra data samples past the template's end are kept as
+       they are (Sarah's lines 471-480).
+
+    Input:
+    data: one condition's average, channels x time (the stim at 2 ms), e.g. average_segment(...)["single"].data
+    template: the finished template (align_template, then blank_template), same channels in the same order
+    fs: sampling freq, usually 48.8 kHz
+    single: pairs only, the single-pulse average (channels x time); leave as None for everything else
+    gap_s: pairs only, time between the pair's two pulses in s (onset to onset, e.g. 0.000451)
+    Returns:
+    deartifacted: the condition with the artifact subtracted, a new array (the input isn't changed). As long as the
+        data, or for pairs as long as raw_template's output
+    shifts: one per channel, in samples (can be a fraction). Positive means the template's artifact was later than the
+        data's, so the data was moved later
+    peaks: one per channel, where the data's artifact peak sat in Sarah's window, in samples from the window start
+        (before the data was moved). Sarah's artifact_peak_frame (hers counts from 1), which postprocess uses to trim
+    """
+    if single is not None:
+        #pair: minus the single, shifted back by the gap, exactly what raw_template does (a new array)
+        data = raw_template(single, data, gap_s, fs)
+    else:
+        data = data.copy() #not a pair: a copy, so filling it in below doesn't change the caller's data
+    #line the data up with the template, one channel at a time
+    shifts = []
+    peaks = []
+    for ch in range(data.shape[0]):
+        #how far the template's artifact is from the data's (positive = the template is later)
+        shift, data_peak, template_peak = _measure_shift(data[ch], template[ch], fs)
+        data[ch] = shift_signal(data[ch], shift) #move the whole data channel onto the template (+shift)
+        shifts.append(shift)
+        peaks.append(data_peak)
+    #subtract over the overlap: the two can differ in length, so only the first n samples have a template to subtract
+    n = min(data.shape[1],template.shape[1])
+    data[:,:n] = data[:,:n] - template[:,:n]
+    return data, np.array(shifts), np.array(peaks)
