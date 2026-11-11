@@ -3,8 +3,10 @@ from preprocess_dbs.deartifact import raw_template
 from preprocess_dbs.deartifact import align_template
 from preprocess_dbs.deartifact import blank_template
 from preprocess_dbs.deartifact import subtract_template
+from preprocess_dbs.deartifact import deartifact_segment
 from preprocess_dbs.align import shift_signal
 from preprocess_dbs import deartifact
+import mne
 import pytest
 FS = 48828.125
 
@@ -178,4 +180,112 @@ def test_subtract_template_with_different_lengths():
     clean_short, _, _ = subtract_template(data[:, :450], np.array([_bump(t, 118)]), FS)
     assert clean_short.shape == (1, 450) #a longer template is cut to the data's length
     assert np.allclose(clean_short[0], response[:450]) #and still subtracted all the way to the data's last sample
+
+
+#fake averages for deartifact_segment: 2 DBS channels, 1 ECoG, 1 EMG, each with its own artifact size and sign
+_SEG_NAMES = ["dbs_3_2", "dbs_4_3", "ecog_1_2", "emg_1"]
+_SEG_SCALES = np.array([[1.0], [-2.0], [0.5], [3.0]]) #one row per channel, so each channel's signal is scaled
+_T = np.arange(600.0)
+
+
+def _seg_bump(center):
+    #a smooth artifact 16 samples wide, exactly 0 outside it (so pchip never sees tiny numbers)
+    return np.where(np.abs(_T - center) < 8, np.cos(np.pi * (_T - center) / 16) ** 2, 0.0)
+
+
+def _seg_response(start, amp):
+    #a "brain response" starting at sample `start`
+    return np.where(_T > start, amp * np.sin((_T - start) / 8), 0.0)
+
+
+_SEG_NAVE = {"single": 100, "burst_1": 90, "burstprobes_1": 40, "paired_0.25_1": 60, "paired_0.45_1": 50,
+             "paired_0.96_1": 70} #different pulse counts, so a mix-up between conditions would show
+
+
+def _fake_averages(conditions=("single", "burst_1", "burstprobes_1", "paired_0.45_1", "paired_0.96_1"),
+                   template_lags=(0.0, 0.0, 0.0, 0.0)):
+    #the artifact peaks at 118 (20 samples after the stim at 98). The 0.45 ms pair's second pulse adds only its artifact,
+    #22 samples later (refractory), moved a further template_lags samples per channel; the 0.96 ms pair's second pulse
+    #adds its artifact AND its own response, 47 samples later. Returns {condition: Evoked}, like average_segment
+    single = _SEG_SCALES * (_seg_bump(118) + _seg_response(250, 0.05))
+    refractory_second = np.vstack([_SEG_SCALES[ch] * _seg_bump(140 + lag) for ch, lag in enumerate(template_lags)])
+    data = {"single": single,
+            "burst_1": _SEG_SCALES * (_seg_bump(118) + _seg_response(250, 0.08)),
+            "burstprobes_1": _SEG_SCALES * (_seg_bump(118) + _seg_response(250, 0.02)),
+            "paired_0.25_1": single + _SEG_SCALES * _seg_bump(130), #a second refractory pair, for the error test
+            "paired_0.45_1": single + refractory_second,
+            "paired_0.96_1": single + _SEG_SCALES * (_seg_bump(165) + _seg_response(297, 0.03))}
+    info = mne.create_info(_SEG_NAMES, FS, ["dbs", "dbs", "ecog", "emg"])
+    return {c: mne.EvokedArray(data[c], info, tmin=-0.002, nave=_SEG_NAVE[c], comment=c, verbose=False)
+            for c in conditions}
+
+
+def test_deartifact_segment_cleans_every_condition():
+    #with the template built from the 0.45 ms pair, every condition should come back as just its brain response.
+    #blank=False here: this fake artifact is so short it sits entirely inside the stretch Sarah's blanking flattens
+    #(samples 97-131), so blanking would leave the template empty (open question Q1 on real data)
+    cleaned, peaks = deartifact_segment(_fake_averages(), FS, blank=False)
+    s = _SEG_SCALES[:3] #the 3 cleaned channels
+    assert np.allclose(cleaned["single"].data, s * _seg_response(250, 0.05))
+    assert np.allclose(cleaned["burst_1"].data, s * _seg_response(250, 0.08))
+    assert np.allclose(cleaned["burstprobes_1"].data, s * _seg_response(250, 0.02)) #probes: no pair step either
+    assert np.allclose(cleaned["paired_0.45_1"].data, 0) #refractory: its second pulse added only artifact
+    #the 0.96 pair: what's left is its second pulse's response, shifted back 47 samples to start at 250, 47 shorter
+    assert cleaned["paired_0.96_1"].data.shape == (3, 600 - 47)
+    assert np.allclose(cleaned["paired_0.96_1"].data, (s * _seg_response(250, 0.03))[:, :600 - 47])
+    #each channel's artifact peak in Sarah's window: 118 - 97 (the window start) = 21
+    for condition in cleaned:
+        assert peaks[condition] == pytest.approx([21, 21, 21])
+
+
+def test_deartifact_segment_needs_exactly_one_refractory_pair():
+    #no pair under 0.4 ms isi: nothing to build a template from. Two of them: unclear which to use. Both stop with an error
+    with pytest.raises(ValueError, match="refractory"):
+        deartifact_segment(_fake_averages(("single", "burst_1", "paired_0.96_1")), FS)
+    with pytest.raises(ValueError, match="refractory"):
+        deartifact_segment(_fake_averages(("single", "paired_0.25_1", "paired_0.45_1")), FS)
+
+
+def test_deartifact_segment_keeps_emg_out_and_inputs_alone():
+    #only DBS and ECoG come back (EMG stays in the input, unchanged), the Evoked labels carry over, and the input
+    #averages aren't modified
+    averages = _fake_averages()
+    before = {c: e.data.copy() for c, e in averages.items()}
+    cleaned, peaks = deartifact_segment(averages, FS, blank=False)
+    for condition, evoked in cleaned.items():
+        assert evoked.ch_names == ["dbs_3_2", "dbs_4_3", "ecog_1_2"]
+        assert evoked.nave == averages[condition].nave #each condition keeps its own pulse count
+        assert evoked.comment == condition
+        assert evoked.tmin == pytest.approx(averages[condition].tmin)
+        assert len(peaks[condition]) == 3
+    for condition, evoked in averages.items():
+        assert np.array_equal(evoked.data, before[condition])
+
+
+def test_deartifact_segment_aligns_the_template_per_channel():
+    #here the refractory pair's second artifact sits a fraction of a sample off on two channels (0.6 and -0.4 samples),
+    #so the raw template is off too. align_template puts it back on the single pulse, so the single barely moves and its
+    #response stays where it was. Without that step the artifact still gets removed (subtract_template moves each
+    #condition onto the template), but every condition ends up moved by the template's error: on channel 2 the
+    #response lands 0.6 samples late, an error of about 0.008 here, which this test catches
+    averages = _fake_averages(("single", "paired_0.45_1"), template_lags=(0.0, 0.6, -0.4, 0.0))
+    cleaned, _ = deartifact_segment(averages, FS, blank=False)
+    expected = _SEG_SCALES[:3] * _seg_response(250, 0.05)
+    assert np.allclose(cleaned["single"].data[:, 100:200], expected[:, 100:200], atol=0.05) #artifact removed (~2% left)
+    #the response stays put (samples 260-589; the very last samples can be zero-filled when the data moves earlier,
+    #as in Sarah's interp1 with 0 outside the signal)
+    assert np.allclose(cleaned["single"].data[:, 260:590], expected[:, 260:590], atol=0.001)
+
+
+def test_deartifact_segment_passes_blank_on(monkeypatch):
+    #blank must reach blank_template unchanged, whichever way it's set. A stand-in records what it was given and returns
+    #the template untouched (this fake artifact sits inside the blanked stretch, so real blanking would empty it)
+    seen = []
+    def record_blank(template, gap_s, fs, blank=True):
+        seen.append((blank, round(gap_s * 1e3, 2)))
+        return template.copy()
+    monkeypatch.setattr(deartifact, "blank_template", record_blank)
+    deartifact_segment(_fake_averages(("single", "paired_0.45_1")), FS, blank=True)
+    deartifact_segment(_fake_averages(("single", "paired_0.45_1")), FS, blank=False)
+    assert seen == [(True, 0.45), (False, 0.45)] #and with the refractory pair's own gap, 0.45 ms
 

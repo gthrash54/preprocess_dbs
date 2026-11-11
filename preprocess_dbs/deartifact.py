@@ -170,6 +170,31 @@ def subtract_template(data,template, fs, single=None, gap_s=None):
 
 def deartifact_segment(averages, fs, blank=True):
     """
+    Removes the stim artifact from every condition in one stim segment (e.g. stim2), leaving the brain response.
+    Sarah's deartifact.m for one segment.
+    1. Finds the refractory pair: the pair whose isi (gap - 0.1 ms, Sarah's units) is under 0.4 ms, e.g. paired_0.45_1.
+       Its second pulse comes too soon to fire the neurons again, so it adds only an artifact. Exactly one is needed.
+    2. Builds the template (the artifact alone) once, from that pair and the single pulse: raw_template, then
+       align_template, then blank_template.
+    3. Cleans every condition with it (subtract_template): singles, bursts and probes as they are; pairs first have the
+       single subtracted and are shifted back by their own gap, so what's left is their second pulse's response.
+    Only DBS and ECoG channels are cleaned. EMG is left out of the output: a cleaned pair is shifted back by its gap
+    (time 0 = its second pulse), so an unshifted EMG row can't share its time axis. EMG stays as it was in averages
+    (Sarah copies it unchanged too).
+
+    Input:
+    averages: one segment's averages from average_segment, {condition: MNE Evoked}, e.g. {"single": ...,
+        "burst_1": ..., "paired_0.45_1": ...}. Must include "single" and exactly one refractory pair
+    fs: sampling freq, usually 48.8 kHz
+    blank: passed to blank_template. True (default) flattens the template's start as Sarah does (open question Q1);
+        False skips it
+    Returns:
+    cleaned: {condition: MNE Evoked} with the artifact removed, DBS and ECoG channels only. Same start time (-2 ms),
+        pulse count (nave) and name (comment) as the input. Pairs are shorter by their gap, and their time 0 is the
+        second pulse
+    peaks: {condition: array}, each channel's artifact peak position in Sarah's window (samples from the window start,
+        counted from 0; Sarah's artifact_peak_frame counts from 1). Postprocess uses these to trim
+    Raises ValueError if there isn't exactly one refractory pair.
     """
     # find the refractory pair
     refractory_pair = []
