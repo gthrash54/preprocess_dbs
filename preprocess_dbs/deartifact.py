@@ -1,6 +1,7 @@
 import numpy as np
 from preprocess_dbs.align import align_signals
 from preprocess_dbs.align import shift_signal
+import mne
 
 
 def raw_template(single, pp1, gap_s, fs):
@@ -166,3 +167,46 @@ def subtract_template(data,template, fs, single=None, gap_s=None):
     n = min(data.shape[1],template.shape[1])
     data[:,:n] = data[:,:n] - template[:,:n]
     return data, np.array(shifts), np.array(peaks)
+
+def deartifact_segment(averages, fs, blank=True):
+    """
+    """
+    # find the refractory pair
+    refractory_pair = []
+    for name in averages: #each conditions name ie single, paired_0.45_1
+        if name.startswith("paired_"): # only pull pairs
+            gap = float(name.split("_")[1]) #"paired_0.45_1" into ['paired','0.45','1'] indexed to pull the gap 
+            if gap - 0.1 < 0.4: #sarah's isi used gap-0.1 as the isi, refractory if <0.4ms
+                refractory_pair.append(name) #keep its name
+    if len(refractory_pair) != 1: # need exactly one to build the template
+        raise ValueError(f"needs exactly one refractory pair (isi<0.4), found {refractory_pair}")
+    # build the template from the refractory pair
+    template_name = refractory_pair[0]
+    template_gap_s = (float(template_name.split("_")[1])/1000) #template gap in seconds 
+    picks = mne.pick_types(averages["single"].info, dbs=True, ecog=True, exclude=[])#pick the DBS and Ecog rows to clean
+    single = averages["single"].data[picks] #the single-pulse average, DBS and ECoG rows only (channels x time)
+    pair = averages[template_name].data[picks] #the refractory pair's average, same rows
+    template = raw_template(single,pair,template_gap_s,fs=fs) #pair - single, shifted back by the gap: the artifact alone
+    template, template_shifts = align_template(single, template, fs) #slid onto the single pulse's artifact
+    template = blank_template(template,template_gap_s,fs,blank=blank) #start flattened (open question Q1), unless blank=False
+
+    #clean every condition in dbs and ecog rows
+    #channel info for just the picked rows, so the cleaned Evokeds have the right channel names. EMG isn't in them: a
+    #cleaned pair is shifted back by its gap (time 0 = its second pulse), an unshifted EMG row couldn't share that time
+    #axis, so EMG stays as it was in averages (Sarah copies it unchanged too)
+    info = mne.pick_info(averages["single"].info,picks)
+    cleaned = {} #{condition: cleaned Evoked}
+    peaks = {} #{condition: each channel's artifact peak in Sarah's window}, for postprocess's trim later
+    for name, evoked in averages.items(): #each condition's name and its Evoked together
+        data = evoked.data[picks] #this condition's DBS and ECoG rows
+        if name.startswith("paired_"):
+            #a pair: subtract_template also removes the single first and shifts back by this pair's own gap
+            gap_s = float(name.split("_")[1])/1000
+            clean, shifts, peak = subtract_template(data,template,fs=fs,single=single,gap_s=gap_s)
+        else:
+            #single, bursts, probes: just line up with the template and subtract it
+            clean, shifts, peak = subtract_template(data,template,fs=fs)
+        #wrap the cleaned array back into an Evoked: channel names, start time (-2 ms), pulses averaged, condition name
+        cleaned[name] = mne.EvokedArray(clean,info,tmin=evoked.tmin,nave=evoked.nave, comment=name)
+        peaks[name] = peak
+    return cleaned, peaks
