@@ -85,3 +85,34 @@ def crop_and_demean(data,fs):
     m2 = np.mean(crop[:,round(0.003*fs)-1:],axis=1, keepdims=True) # 1ms after artifact peak through +45ms
     demeaned = crop - ((m1+m2)/2)
     return demeaned
+
+
+def fit_drifts(signal,fs):
+    """
+    Fits both a line and a parabola to the slow drift that runs through each recording, mostly from the amplifier and
+    electrode recovering after the pulse. The drift is slow compared to ERNA, but ERNA inside the window can still pull
+    on the fit a little. Part 1 of Sarah's detrend choice (postprocess.m:583-600).
+    The window is every sample after 3 ms (about 1 ms after the artifact peak) and before the last sample's time minus
+    0.5 ms. That keeps the artifact and the edge out of the fit. We fit on that window (a mask and np.polyfit), then
+    evaluate the curves over the entire signal, since they get subtracted from all of it.
+    Input:
+    signal: one channel (1-D) from crop_and_demean, the artifact peak at about 2 ms
+    fs: sampling freq in Hz
+    Returns:
+    linear_drift: the fitted line, evaluated at every sample
+    quadratic_drift: the fitted parabola, evaluated at every sample. Outside the window it's extrapolated and can bend
+        away sharply. The longest stretch it's extrapolated over is the first 3 ms, where the artifact is anyway
+        (Sarah's method; see Q2)
+    mask: True for the samples the fits used
+    Raises ValueError if fewer than 3 samples are in the window, since a parabola needs at least 3 points.
+    """
+    time_axis = ((np.arange(len(signal)))/fs*1000) #array the length of the signal in ms
+    mask = (time_axis > 3) & (time_axis < (time_axis[-1]-0.5)) #window to fit the drift on: after 3 ms to avoid the artifact, until 0.5 ms before the end to avoid edge effects
+    #fail loudly: a parabola needs at least 3 points (a short signal from crop_and_demean can leave fewer)
+    if mask.sum() < 3:
+        raise ValueError(f"only {mask.sum()} samples in the drift window: too few to fit a parabola")
+    line_fit = np.polyfit(time_axis[mask], signal[mask], deg=1)
+    parabola_fit = np.polyfit(time_axis[mask],signal[mask],deg=2) #deg 2 is quadratic fit
+    linear_drift = np.polyval(line_fit,time_axis)
+    quadratic_drift = np.polyval(parabola_fit,time_axis) #when extrapolating a parabola, it can bend away sharply from the data but this is most prominent where artifact is anyway.
+    return linear_drift, quadratic_drift, mask

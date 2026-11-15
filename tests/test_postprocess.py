@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 from preprocess_dbs.postprocess import trim_to_artifact
 from preprocess_dbs.postprocess import crop_and_demean
+from preprocess_dbs.postprocess import fit_drifts
 
 FS = 48828.125
 
@@ -101,3 +102,56 @@ def test_crop_and_demean_refuses_a_too_short_signal():
     with pytest.raises(ValueError, match="too short"):
         crop_and_demean(np.ones((2, 145)), FS)
     assert crop_and_demean(np.ones((2, 146)), FS).shape == (2, 146)
+
+
+def _drift_test_signal(drift):
+    #a known drift plus two traps the fit window must leave out: a big artifact spike at 2 ms (in the first 3 ms) and a
+    #jump in the last 0.3 ms (in the last 0.5 ms). If either got into the fit, the fitted curves would bend toward it
+    t = np.arange(2295) / FS * 1000 #ms from the trimmed start
+    spike = np.where(t < 3, 5 * np.exp(-((t - 2) / 0.1) ** 2), 0.0)
+    end_jump = np.where(t > t[-1] - 0.3, 3.0, 0.0)
+    return t, drift(t) + spike + end_jump
+
+
+def test_fit_drifts_recovers_a_straight_drift_despite_the_artifact():
+    #a straight drift: both fits should find exactly it, everywhere (the spike is outside the fitted window)
+    t, signal = _drift_test_signal(lambda t: 0.2 + 0.01 * t)
+    linear, quadratic, mask = fit_drifts(signal, FS)
+    assert np.allclose(linear, 0.2 + 0.01 * t)
+    assert np.allclose(quadratic, 0.2 + 0.01 * t) #a parabola can be a straight line (its squared term goes to 0)
+
+
+def test_fit_drifts_quadratic_catches_a_bend():
+    #a bending drift: only the parabola can follow it; the line misses it by a clear margin
+    bend = lambda t: 0.1 - 0.02 * t + 0.0008 * t ** 2
+    t, signal = _drift_test_signal(bend)
+    linear, quadratic, mask = fit_drifts(signal, FS)
+    assert np.allclose(quadratic, bend(t))
+    assert np.abs(linear - bend(t))[mask].max() > 0.1
+
+
+def test_fit_drifts_window_edges():
+    #the fit window is t > 3 ms and t < (last time - 0.5 ms): samples 147 to 2269 of a 2295-sample signal at 48.8 kHz
+    _, signal = _drift_test_signal(lambda t: 0 * t)
+    _, _, mask = fit_drifts(signal, FS)
+    kept = np.flatnonzero(mask)
+    assert kept[0] == 147 #146 is 2.990 ms, 147 is 3.011 ms
+    assert kept[-1] == 2269 #the last sample is 46.981 ms, so the window ends below 46.481 ms (2269 is 46.469 ms)
+    assert len(kept) == 2269 - 147 + 1 #one unbroken stretch
+
+
+
+def test_fit_drifts_shapes_and_input():
+    #both curves and the mask are as long as the signal, the mask is True/False, and the input isn't changed
+    _, signal = _drift_test_signal(lambda t: 0.2 + 0.01 * t)
+    before = signal.copy()
+    linear, quadratic, mask = fit_drifts(signal, FS)
+    assert linear.shape == quadratic.shape == mask.shape == signal.shape
+    assert mask.dtype == bool
+    assert np.array_equal(signal, before)
+
+
+def test_fit_drifts_refuses_a_too_short_window():
+    #crop_and_demean accepts as few as 146 samples, but then no sample is after 3 ms, so there's nothing to fit
+    with pytest.raises(ValueError, match="too few"):
+        fit_drifts(np.ones(146), FS)
