@@ -140,3 +140,47 @@ def score_drifts(signal, linear_drift, quadratic_drift, mask):
         score = np.mean(np.abs(scaled[mask])) #how far from flat it is, inside the drift window only
         scores.append(score)
     return scores
+
+
+def choose_detrend(scores,condition):
+    """
+    Picks which detrend to use for one DBS channel (none, linear or quadratic) from its three scores, using Sarah's
+    rule. Part 3 of her detrend choice (postprocess.m:612-655).
+    Branch A, bursts 1-9: their epochs are too short for a quadratic, so only none and linear are compared. The two
+    scores are normalized by the larger one, and linear wins if it at least halves the score.
+    Branch B, everything else (single, pairs, probes, burst_10): all three scores are normalized by the largest, then
+    checked in order, and the first rule that matches wins:
+    1. quadratic, if it cuts the score by at least 35% (q <= 0.65 n) and is at least 0.10 lower than linear (an
+       absolute difference in normalized scores, not 10% of linear's)
+    2. linear, if the quadratic cuts it by 35% but isn't 0.10 lower than linear (not worth the extra bend)
+    3. linear, if the quadratic doesn't cut it by 35% but linear's normalized score is at most 0.85
+    4. none otherwise
+    Rule 3's comment in her code says "linear provides 25% reduction", but the code only requires linear's score to be
+    at most 85% of the LARGEST score. That needn't be an improvement over no detrending at all: scores 0.2, 0.4, 1.0
+    pick linear even though linear doubles the score (open question Q2 in notes_for_walker.md). Copied as her code runs.
+    Input:
+    scores: the three scores from score_drifts, in the order none, linear, quadratic
+    condition: the condition's name, e.g. "single", "burst_3", "paired_0.96_1"
+    Returns: "none", "linear" or "quadratic"
+    """
+    scores = scores.copy()
+    #branch A: Sarah's nine short-burst names exactly (an allow-list), so burst_10, burstprobes_ and anything new go to B
+    short_bursts = [f"burst_{x}" for x in range(1,10)]
+    if condition in short_bursts:
+        burst_scores = np.array(scores[0:2]) #none and linear only
+        none_burst_normalized, linear_burst_normalized = burst_scores/np.max(burst_scores)
+        if linear_burst_normalized <= none_burst_normalized/2: #linear at least halves the score
+            return "linear"
+        else:
+            return "none"
+    #branch B: all three, normalized by the largest, checked in order (the first match wins)
+    else:
+        n, l, q = np.array(scores)/np.max(scores)
+        if q <= 0.65*n and q - l <= -0.10: #rule 1: quadratic cuts 35% and beats linear by 0.10
+            return "quadratic"
+        elif q <= 0.65*n and q-l > -0.10: #rule 2: quadratic helps, but not enough beyond linear
+            return "linear"
+        elif q > 0.65*n and l <= 0.85: #rule 3: quadratic doesn't help much, linear does a little
+            return "linear"
+        else: #rule 4: neither helps enough
+            return "none"

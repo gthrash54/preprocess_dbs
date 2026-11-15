@@ -4,6 +4,7 @@ from preprocess_dbs.postprocess import trim_to_artifact
 from preprocess_dbs.postprocess import crop_and_demean
 from preprocess_dbs.postprocess import fit_drifts
 from preprocess_dbs.postprocess import score_drifts
+from preprocess_dbs.postprocess import choose_detrend
 
 FS = 48828.125
 
@@ -189,3 +190,63 @@ def test_score_drifts_ignore_samples_outside_the_mask():
     clean_scores = score_drifts(signal,linear_drift,quadratic_drift,mask)
     trap_scores = score_drifts(signal+trap,linear_drift,quadratic_drift,mask)
     assert np.allclose(clean_scores,trap_scores)
+
+
+#every rule of Sarah's detrend choice, plus the exact thresholds, plus which branch each condition name goes to.
+#Each row: (scores as none, linear, quadratic; condition; expected choice). pytest runs the test once per row.
+#Careful with exact decimal boundaries: 0.4 - 0.5 is -0.09999999999999998 on a computer, so an "exact" -0.10 can land
+#on either side from rounding alone. 0.1 - 0.2 does come out as exactly -0.1, so that pair tests rule 1's <= exactly
+@pytest.mark.parametrize("scores, condition, expected", [
+    #branch A (bursts 1-9): none vs linear only (the quadratic score isn't used)
+    ([0.2, 0.05, 0.9], "burst_3", "linear"), #linear cuts the score by 75%
+    ([0.2, 0.15, 0.9], "burst_3", "none"), #only a 25% cut
+    ([0.2, 0.10, 0.9], "burst_3", "linear"), #boundary: exactly half counts
+    ([0.2, 0.1001, 0.9], "burst_3", "none"), #just over half
+    #branch B: one row per rule
+    ([1.0, 0.5, 0.2], "single", "quadratic"), #rule 1
+    ([1.0, 0.5, 0.45], "single", "linear"), #rule 2: quadratic helps, but only 0.05 beyond linear
+    ([1.0, 0.8, 0.9], "single", "linear"), #rule 3
+    ([1.0, 0.9, 0.95], "single", "none"), #rule 4
+    #branch B boundaries
+    ([1.0, 0.9, 0.65], "single", "quadratic"), #exactly 0.65 x none still counts
+    ([1.0, 0.9, 0.651], "single", "none"), #just over: rule 1 fails and linear (0.9) is too big for rule 3
+    ([1.0, 0.85, 0.9], "single", "linear"), #rule 3 at exactly 0.85
+    ([1.0, 0.86, 0.9], "single", "none"), #just over
+    #normalizing and routing
+    ([0.4, 0.24, 0.16], "single", "quadratic"), #normalized: 1, 0.6, 0.4 -> rule 1. Without normalizing, q - l would
+                                                #be only -0.08 and it would wrongly say linear
+    ([1.0, 0.5, 0.2], "burst_10", "quadratic"), #branch B (branch A would say linear)
+    ([1.0, 0.5, 0.2], "burstprobes_4", "quadratic"), #branch B too
+    ([1.0, 0.5, 0.2], "burst_3", "linear"), #the same scores go to branch A: proves the routing
+    #the largest score isn't always none's
+    ([0.1, 0.2, 0.9], "burst_3", "none"), #branch A: linear is the larger, so it normalizes to 1 and none to 0.5
+    ([0.8, 0.5, 1.0], "single", "linear"), #branch B: quadratic is the largest; rule 3 (linear 0.5 <= 0.85)
+    ([0.2, 0.4, 1.0], "single", "linear"), #rule 3 even though linear doubles none's score (her Q2 quirk). Catches
+                                           #normalizing by none instead of the largest, or comparing l to 0.85 x n
+    #more edges
+    ([1.0, 0.2, 0.1], "single", "quadratic"), #rule 1 at exactly q - l = -0.10 (0.1 - 0.2 is exact): <= counts
+    ([1.0, 0.7, 0.65], "single", "linear"), #rule 2 qualifies on the QUADRATIC's 35% cut, not linear's
+    ([0.2, 0.05, 0.9], "burst_1", "linear"), #both ends of the nine-name allow-list are branch A
+    ([0.2, 0.05, 0.9], "burst_9", "linear"),
+    ([1.0, 0.5, 0.2], "paired_0.45_1", "quadratic"), #pairs go to branch B
+])
+def test_choose_detrend_rules(scores, condition, expected):
+    assert choose_detrend(scores, condition) == expected
+
+
+
+
+def test_score_drifts_known_answer():
+    #score_drifts on its own, with a tiny hand-made signal, drifts and mask, so every score can be worked out by hand.
+    #The behavior tests above can't see the arithmetic; this one catches skipping the scaling, a true RMS instead of a
+    #mean absolute value, max without abs, the original signal's max for every version, and swapped outputs
+    signal = np.array([4.0, 1.0, -1.0, 2.0, -2.0, 0.0])
+    mask = np.array([False, True, True, True, True, False]) #the 4 middle samples; the 4.0 is outside but sets the scale
+    linear_drift = np.array([0.0, 1.0, -1.0, 2.0, -2.0, 0.0]) #removes everything inside the window
+    quadratic_drift = np.array([7.0, 0.0, 0.0, 0.0, 0.0, 0.0]) #only changes the first sample, to -3
+    #none: largest |value| 4, so the window becomes 0.25, 0.25, 0.5, 0.5 -> mean 0.375
+    #linear: signal - drift = 4, 0, 0, 0, 0, 0 -> the window is all 0 -> 0.0
+    #quadratic: signal - drift = -3, 1, -1, 2, -2, 0; largest |value| 3 (a negative one, so max without abs would
+    #give 2) -> the window becomes 1/3, 1/3, 2/3, 2/3 -> mean 0.5
+    assert score_drifts(signal, linear_drift, quadratic_drift, mask) == pytest.approx([0.375, 0.0, 0.5])
+
