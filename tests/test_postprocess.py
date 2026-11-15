@@ -3,6 +3,7 @@ import pytest
 from preprocess_dbs.postprocess import trim_to_artifact
 from preprocess_dbs.postprocess import crop_and_demean
 from preprocess_dbs.postprocess import fit_drifts
+from preprocess_dbs.postprocess import score_drifts
 
 FS = 48828.125
 
@@ -155,3 +156,36 @@ def test_fit_drifts_refuses_a_too_short_window():
     #crop_and_demean accepts as few as 146 samples, but then no sample is after 3 ms, so there's nothing to fit
     with pytest.raises(ValueError, match="too few"):
         fit_drifts(np.ones(146), FS)
+
+
+def test_score_drifts_straight_drift_favors_linear():
+    #a realistic signal: an artifact spike at 2 ms, a straight drift, and a small response after 3 ms. The artifact has to
+    #be there: scoring scales each version by its largest value, and in real data that's the artifact. Removing the line
+    #should flatten the window a lot, and the parabola should do about the same as the line (it can fit a line too; it
+    #comes out a hair lower here because its extra bend soaks up a little of the response)
+    t = np.arange(2295)/FS*1000
+    artifact = np.where(t < 3, 5 * np.exp(-((t - 2) / 0.1) ** 2), 0.0)
+    drift = t*0.05 + 0.0010 #straight
+    response = np.where(t > 3, np.sin(2*np.pi*0.3*t) * 0.05, 0)
+    signal = artifact + drift + response
+    linear_drift, quadratic_drift, mask = fit_drifts(signal,FS)
+    none, linear, quadratic = score_drifts(signal,linear_drift,quadratic_drift,mask)
+    assert linear < none/2
+    assert linear == pytest.approx(quadratic, abs=0.001)
+
+
+def test_score_drifts_ignore_samples_outside_the_mask():
+    #invariance test: put a trap where score_drifts should not look (the last 0.3 ms, outside the window) and check the
+    #scores don't change. If the mask were forgotten, the trap would leak into the scores. The trap stays smaller than
+    #the artifact, so it doesn't become the largest value and change the scaling the function rightly uses
+    t = np.arange(2295)/FS*1000
+    artifact = np.where(t < 3, 5 * np.exp(-((t - 2) / 0.1) ** 2), 0.0)
+    drift = t*0.05 + 0.0010 #straight
+    response = np.where(t > 3, np.sin(2*np.pi*0.3*t) * 0.05, 0)
+    signal = artifact + drift + response
+    trap = np.where(t > t[-1]-0.3, 1, 0)
+    #fit once on the clean signal and reuse the drifts and mask, so this tests score_drifts only
+    linear_drift, quadratic_drift, mask = fit_drifts(signal,FS)
+    clean_scores = score_drifts(signal,linear_drift,quadratic_drift,mask)
+    trap_scores = score_drifts(signal+trap,linear_drift,quadratic_drift,mask)
+    assert np.allclose(clean_scores,trap_scores)

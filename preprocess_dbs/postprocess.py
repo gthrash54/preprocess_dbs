@@ -116,3 +116,27 @@ def fit_drifts(signal,fs):
     linear_drift = np.polyval(line_fit,time_axis)
     quadratic_drift = np.polyval(parabola_fit,time_axis) #when extrapolating a parabola, it can bend away sharply from the data but this is most prominent where artifact is anyway.
     return linear_drift, quadratic_drift, mask
+
+
+def score_drifts(signal, linear_drift, quadratic_drift, mask):
+    """
+    Scores the drift window for three versions of one channel: as it is, minus the linear drift, and minus the
+    quadratic drift. A smaller score means the window is smaller compared to that version's own largest value, which
+    usually means more drift was removed (it can't tell drift from response, though). Part 2 of Sarah's detrend choice
+    (postprocess.m:601-610).
+    Each version is scaled by its own largest absolute value, then scored as the mean absolute value inside the window.
+    In real data the largest value is usually the artifact, so the three end up on about the same scale, but that's an
+    assumption, not a guarantee. Sarah calls these scores "rms", but they're mean absolute values (open question Q2 in
+    notes_for_walker.md). A version that's all zeros gives 0/0, so its score is NaN.
+    Input:
+    signal: one channel (1-D) from crop_and_demean
+    linear_drift, quadratic_drift, mask: from fit_drifts on that same signal
+    Returns: a list of three scores, in the order none, linear, quadratic
+    """
+    signals = [signal,(signal-linear_drift),(signal-quadratic_drift)] #the three versions to compare
+    scores = []
+    for x in signals:
+        scaled = x/(np.max(np.abs(x))) #its biggest point becomes +-1
+        score = np.mean(np.abs(scaled[mask])) #how far from flat it is, inside the drift window only
+        scores.append(score)
+    return scores
