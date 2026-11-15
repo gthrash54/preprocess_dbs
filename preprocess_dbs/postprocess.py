@@ -51,3 +51,37 @@ def trim_to_artifact(data,peaks,fs):
     for ch in range(data.shape[0]):
         output[ch] = trimmed_channels[ch][:shortest]
     return output
+
+def crop_and_demean(data,fs):
+    """
+    Cuts the channels from -2 to 45 ms around the artifact peak, then subtracts each channel's level, the average of a
+    pre-artifact mean (m1, -2 to -1 ms) and a post-artifact mean (m2, about +1 ms to the end; with her indexing it
+    starts at +0.96 ms). Sarah's postprocess.m:570-579.
+    Both windows skip the artifact itself but the artifact stays in the signal.
+    The post-artifact window has ERNA in it because ERNA swings up and down, it mostly averages out to around zero.
+    But its first, biggest swings don't fully cancel, so a big response nudges the level. Using only a late window
+    (e.g. 25-45 ms, after the ERNA has died out) could increase rigor (open question Q6, in notes_for_walker.md).
+    Sarah's comment calls this a "general/dirty demean" on purpose; the final median baseline (postprocess's last
+    step) sets the level again.
+    Input:
+    data: the output of trim_to_artifact, channels x time, the artifact peak at sample 98 (time 0)
+    fs: sampling freq in hz
+    Return:
+    demeaned: a new array, channels x 2295 samples (-2 to +45 ms at 48.8 kHz; all of it if the signal is shorter), each
+        channel centered on its level. The input isn't changed
+    Raises ValueError if the signal is too short for m2 (146 samples or fewer), which would otherwise turn every value
+    into NaN.
+    """
+    #45ms after the artifact plus 2ms before (2295 samples)
+    after = round(0.045*fs)
+    before = round(0.002*fs)
+    crop = data[:,:after+before]
+    #fail loudly: with 145 samples or fewer, m2's window (from sample 145) is empty, its mean is NaN, and so is every
+    #output value
+    if crop.shape[1] <= round(0.003*fs)-1:
+        raise ValueError(f"only {crop.shape[1]} samples: too short for the post-artifact window (sample "
+                         f"{round(0.003*fs)-1} on)")
+    m1 = np.mean(crop[:,:round(0.001*fs)], axis=1, keepdims=True) # the first 1ms slice(prestim baseline, -2->-1ms) because it is relatively quiet to demean
+    m2 = np.mean(crop[:,round(0.003*fs)-1:],axis=1, keepdims=True) # 1ms after artifact peak through +45ms
+    demeaned = crop - ((m1+m2)/2)
+    return demeaned
