@@ -1,5 +1,7 @@
 import numpy as np
 import pytest
+from preprocess_dbs.postprocess import moving_mean
+from preprocess_dbs.postprocess import smoothing_features
 from preprocess_dbs.postprocess import trim_to_artifact
 from preprocess_dbs.postprocess import crop_and_demean
 from preprocess_dbs.postprocess import fit_drifts
@@ -322,3 +324,96 @@ def test_detrend_channel_refuses_other_channel_types():
     for channel_type in ("emg", "misc", "ecog_anterior"):
         with pytest.raises(ValueError, match="'dbs' or 'ecog'"):
             detrend_channel(signal, FS, "single", channel_type)
+
+
+def test_moving_mean_shrinks_at_the_edges():
+    #MATLAB's movmean: the first sample averages only 1 and 2, the last only 4 and 5 (no padding)
+    assert np.allclose(moving_mean(np.array([1.0, 2.0, 3.0, 4.0, 5.0]), 3), [1.5, 2, 3, 4, 4.5])
+
+
+def test_moving_mean_matches_a_plain_loop():
+    #against the definition written out as a loop, with Sarah's two window sizes, on random data of a real length
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=2295)
+    for window in (5, 73):
+        half = window // 2
+        by_hand = np.array([x[max(0, i - half):i + half + 1].mean() for i in range(len(x))])
+        assert np.allclose(moving_mean(x, window), by_hand)
+
+
+def test_moving_mean_refuses_an_even_window():
+    with pytest.raises(ValueError, match="odd"):
+        moving_mean(np.ones(10), 4)
+
+
+
+def test_smoothing_features_run_0_to_1():
+    #regression test for a bug caught while writing it: building activity from the raw slope and bend (dx, ddx)
+    #instead of their moving RMS. Raw slopes swing negative, so activity went down to about -2 on this signal.
+    #A moving RMS can't be negative, so both features must stay at 0 or above, with a max of exactly 1.
+    #The signal: an artifact at 2 ms plus a 300 Hz ringing that starts at 0 and dies out (swings both ways, like ERNA)
+    t = np.arange(2295) / FS
+    signal = 5e-3 * np.exp(-((t - 0.002) / 0.00005) ** 2) + 2e-4 * np.sin(2 * np.pi * 300 * t) * np.exp(-t / 0.01)
+    activity, envelope = smoothing_features(signal, FS)
+    for feature in (activity, envelope):
+        assert len(feature) == len(signal)
+        assert feature.min() >= 0
+        assert feature.max() == pytest.approx(1)
+
+
+def test_smoothing_features_windows_on_a_single_spike():
+    #one nonzero sample shows exactly where each feature spreads, which pins down the windows and the 0 in front of diff
+    #activity: the slope is nonzero at samples k and k+1, the bend at k to k+2; the 5-sample window spreads each by 2
+    #on both sides, so activity is nonzero from k-2 to k+4. (Putting the 0 at the end of diff instead gives k-4 to k+2.)
+    #envelope: the squared signal is nonzero only at k; the 73-sample window spreads it 36 each way, and every one of
+    #those samples averages the same single value, so the envelope is exactly 1 on k-36 to k+36 and 0 everywhere else.
+    signal = np.zeros(301)
+    k = 150
+    signal[k] = 1.0
+    activity, envelope = smoothing_features(signal, FS)
+    assert np.array_equal(np.flatnonzero(activity > 1e-6), np.arange(k - 2, k + 5))
+    assert np.array_equal(np.flatnonzero(envelope > 1e-6), np.arange(k - 36, k + 37))
+    assert np.allclose(envelope[k - 36:k + 37], 1)
+
+
+def test_smoothing_features_match_her_formulas_written_out():
+    #Sarah's lines 674-691 written out one sample at a time, with the window sizes typed in by hand.
+    #The bend is so much bigger than the slope that dropping the slope, changing the 0.5 or skipping a square root only
+    #moves activity a tiny bit, so the comparison has to be tight (rtol 1e-9) to see it.
+    #Two sampling rates: at half our rate the windows are 3 and 37 samples, so hardcoding 5 and 73 would fail.
+    rng = np.random.default_rng(1)
+    for fs, feature_window, envelope_window in ((FS, 5, 73), (FS / 2, 3, 37)):
+        x = rng.normal(size=500)
+        n = len(x)
+        dx = [0.0] + [(x[i] - x[i - 1]) * fs for i in range(1, n)]
+        ddx = [0.0] + [(dx[i] - dx[i - 1]) * fs for i in range(1, n)]
+
+        def moving_rms(values, window):
+            half = window // 2
+            return np.array([np.sqrt(np.mean(np.square(values[max(0, i - half):i + half + 1]))) for i in range(n)])
+
+        combined = moving_rms(dx, feature_window) + 0.5 * moving_rms(ddx, feature_window)
+        signal_rms = moving_rms(x, envelope_window)
+        activity, envelope = smoothing_features(x, fs)
+        assert np.allclose(activity, combined / combined.max(), rtol=1e-9, atol=0)
+        assert np.allclose(envelope, signal_rms / signal_rms.max(), rtol=1e-9, atol=0)
+
+
+def test_moving_mean_refuses_a_window_below_1():
+    for window in (0, -1):
+        with pytest.raises(ValueError, match="positive odd"):
+            moving_mean(np.ones(10), window)
+
+
+def test_moving_mean_refuses_nan_and_inf():
+    #pandas would quietly skip these (giving [1, 2, 3]), while MATLAB's movmean spreads a NaN, so stop instead
+    for bad in (np.nan, np.inf):
+        with pytest.raises(ValueError, match="NaN or Inf"):
+            moving_mean(np.array([1.0, bad, 3.0]), 3)
+
+
+def test_smoothing_features_refuses_a_flat_signal():
+    #all zeros has no size and no slope; a constant has a size but no slope. Either would divide by 0 and give NaN.
+    for flat in (np.zeros(200), np.full(200, 2.0)):
+        with pytest.raises(ValueError, match="flat"):
+            smoothing_features(flat, FS)

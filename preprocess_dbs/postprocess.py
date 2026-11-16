@@ -1,6 +1,8 @@
 """Sarah's postprocess.m: the cleanup after de-artifacting (trim to the artifact peak, crop and demean, detrend choice,
 adaptive Savitzky-Golay smoothing, baseline)."""
 import numpy as np
+import pandas as pd
+from scipy.signal import savgol_filter
 
 
 def trim_to_artifact(data,peaks,fs):
@@ -216,3 +218,83 @@ def detrend_channel(signal,fs,condition,channel_type):
         chosen_drift = {"none":np.zeros(len(signal)), "linear":linear_drift, "quadratic":quadratic_drift}[choice]
         detrended_signal = signal - chosen_drift
         return detrended_signal, choice
+
+
+
+def moving_mean(x,window):
+    """
+    Averages each sample with its neighbors, the way MATLAB's movmean does (Sarah uses it for the smoothing features,
+    postprocess.m:682-690). The window is centered on each sample, with (window-1)/2 samples on each side.
+    Near the edges there aren't enough neighbors, so the window shrinks and averages only the samples that exist, like
+    movmean. With a 5-sample window, the first sample is the mean of samples 0-2.
+    Input:
+    x: a 1-D signal with no NaN or Inf
+    window: how many samples to average, a positive odd number
+    Returns: the smoothed signal, the same length as x
+    Raises ValueError for an even or non-positive window. An even window has no middle sample, and MATLAB's rule for
+    placing it (one extra sample before) isn't copied here.
+    Raises ValueError if x has NaN or Inf. pandas quietly leaves them out of the average, while movmean spreads a NaN to
+    every window it touches, so the two would differ without any warning.
+    """
+    if window < 1 or window % 2 == 0:
+        raise ValueError(f"Window must be a positive odd number, got {window}")
+    if not np.all(np.isfinite(x)):
+        raise ValueError("x has NaN or Inf values")
+    smoothed = pd.Series(x).rolling(window, center=True, min_periods=1).mean().to_numpy()
+    return smoothed
+
+
+def _odd_window(seconds,fs):
+    """
+    Turns a window length in seconds into a whole, odd number of samples, so the window has a middle sample. Same as
+    Sarah's round(seconds*fs), plus 1 if even (postprocess.m:678-681, 688-689).
+    Python rounds exact halves to the even number, and MATLAB rounds them away from zero. That never changes the result
+    here: of the two candidates one is even, and adding 1 to it lands on the same odd number. (Neither of her windows
+    lands on a half at 48828.125 Hz anyway.)
+    """
+    window = round(seconds*fs)
+    if window % 2 == 0:
+        window += 1
+    return window
+
+
+def smoothing_features(signal,fs):
+    """
+    Computes the two features Sarah's adaptive Savitzky-Golay uses to pick a smoothing state at each sample
+    (postprocess.m:674-691). Both are built from moving RMS values (square, average over a window, square root).
+    - activity: how fast the signal is changing. The moving RMS of the slope plus half the moving RMS of the bend
+      (second derivative), over a 0.1 ms window (5 samples at 48.8 kHz). It spikes at the artifact. Sarah's
+      activity_fast.
+    - envelope: how big the signal is. The moving RMS of the signal itself over a 1.5 ms window (73 samples at
+      48.8 kHz), so it changes slowly. It stays high through the response and falls as the response fades. Sarah's
+      energy_slow.
+    Each is divided by its own max, so both stay between 0 and 1 with a max of exactly 1, and her state thresholds
+    (0.4, 0.2, 0.25) apply.
+    The slope is per second and the bend per second squared, so they aren't on the same scale. For a wave at frequency
+    f, the bend is about 2*pi*f times the slope (about 1,900 times for a 300 Hz ERNA, far more at the artifact), so
+    activity is really just the scaled moving RMS of the bend; the slope only matters for content slower than about
+    0.3 Hz. Copied as her code runs; see notes_for_walker.md.
+    Input:
+    signal: one channel (1-D) from detrend_channel
+    fs: sampling freq in Hz
+    Returns: activity, envelope (each the same length as signal, between 0 and 1)
+    Raises ValueError for a flat signal. Its max is 0, so scaling would divide by 0 and quietly give NaN (Sarah's code
+    doesn't check).
+    """
+    #slope and bend, per second like Sarah's (diff is one sample shorter, so a 0 in front keeps the length)
+    dx = np.concat(([0.0],np.diff(signal)))*fs
+    ddx = np.concat(([0.0],np.diff(dx)))*fs
+    feature_window = _odd_window(0.0001,fs) #0.1 ms: 5 samples at 48.8 kHz
+    envelope_window = _odd_window(0.0015,fs) #1.5 ms: 73 samples
+    dx_rms = np.sqrt(moving_mean(dx**2, feature_window))
+    ddx_rms = np.sqrt(moving_mean(ddx**2, feature_window))
+    combined_rms = dx_rms + ddx_rms/2 #her weights: the bend counts half as much as the slope (but see the docstring)
+    signal_rms = np.sqrt(moving_mean(signal**2, envelope_window))
+    #fail loudly: a flat signal has nothing to scale (a constant has no slope; all zeros has no size either)
+    if np.max(combined_rms) == 0 or np.max(signal_rms) == 0:
+        raise ValueError("signal is flat, so its features can't be scaled to 0-1")
+    activity = combined_rms/np.max(combined_rms) #0 to 1
+    envelope = signal_rms/np.max(signal_rms) #0 to 1
+    return activity,envelope
+
+    
