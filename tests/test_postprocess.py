@@ -314,3 +314,11 @@ def test_detrend_channel_passes_the_condition_on(monkeypatch):
     detrend_channel(signal, FS, "burst_3", "dbs")
     assert seen == ["burst_3"]
 
+
+
+def test_detrend_channel_refuses_other_channel_types():
+    #EMG (or anything else) should never reach this step; if it does, stop with a clear error instead of detrending it
+    _, signal, _ = _detrend_test_signal(lambda t: 0.05 * t)
+    for channel_type in ("emg", "misc", "ecog_anterior"):
+        with pytest.raises(ValueError, match="'dbs' or 'ecog'"):
+            detrend_channel(signal, FS, "single", channel_type)

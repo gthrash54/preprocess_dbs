@@ -189,8 +189,8 @@ def choose_detrend(scores,condition):
 def detrend_channel(signal,fs,condition,channel_type):
     """
     Detrends one channel the way Sarah does (postprocess.m:583-655): DBS channels get the drift picked by her rule taken
-    off; ECoG channels are left as they are (her code skips them). Any other type is treated like DBS, so the caller has
-    to leave EMG out, as her code does earlier (postprocess.m:548).
+    off; ECoG channels are left as they are (her code skips them). Any other type (EMG, misc) raises an error: her code
+    leaves EMG out of this step (postprocess.m:548), so getting one here means the caller made a mistake.
     For DBS this chains the three parts: fit_drifts (a line and a parabola), score_drifts (scores the drift window for
     each option), choose_detrend (her rule), then subtracts the chosen drift from the whole signal ("none" subtracts
     nothing).
@@ -201,7 +201,11 @@ def detrend_channel(signal,fs,condition,channel_type):
     channel_type: the channel's MNE type as to_mne sets it, "dbs" or "ecog" (her code checks whether the type contains
         "ecog"; to_mne's types are exact)
     Returns: the detrended signal (a new array, the input isn't changed) and the choice: "none", "linear" or "quadratic"
+    Raises ValueError for any channel_type other than "dbs" or "ecog".
     """
+    #fail loudly: only DBS and ECoG belong here (an allow-list, like the short bursts in choose_detrend)
+    if channel_type not in ("dbs", "ecog"):
+        raise ValueError(f"detrend_channel takes 'dbs' or 'ecog' channels, got {channel_type!r}")
     if channel_type == "ecog":
         return signal.copy(), "none" #ECoG skips detrending (a copy, so changing the result can't change the input)
     else:
