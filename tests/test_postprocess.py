@@ -5,6 +5,7 @@ from preprocess_dbs.postprocess import crop_and_demean
 from preprocess_dbs.postprocess import fit_drifts
 from preprocess_dbs.postprocess import score_drifts
 from preprocess_dbs.postprocess import choose_detrend
+from preprocess_dbs.postprocess import detrend_channel
 
 FS = 48828.125
 
@@ -249,4 +250,67 @@ def test_score_drifts_known_answer():
     #quadratic: signal - drift = -3, 1, -1, 2, -2, 0; largest |value| 3 (a negative one, so max without abs would
     #give 2) -> the window becomes 1/3, 1/3, 2/3, 2/3 -> mean 0.5
     assert score_drifts(signal, linear_drift, quadratic_drift, mask) == pytest.approx([0.375, 0.0, 0.5])
+
+
+def _detrend_test_signal(drift):
+    #an artifact spike at 2 ms, a drift, and a small response after 3 ms, like the score_drifts tests
+    t = np.arange(2295) / FS * 1000
+    artifact = np.where(t < 3, 5 * np.exp(-((t - 2) / 0.1) ** 2), 0.0)
+    response = np.where(t > 3, np.sin(2 * np.pi * 0.3 * t) * 0.05, 0.0)
+    return t, artifact + drift(t) + response, artifact + response
+
+
+def test_detrend_channel_takes_off_a_straight_drift():
+    #a straight drift on a DBS channel: her rule picks linear, and what's left is the signal without the drift
+    t, signal, without_drift = _detrend_test_signal(lambda t: 0.05 * t + 0.001)
+    before = signal.copy()
+    detrended, choice = detrend_channel(signal, FS, "single", "dbs")
+    assert choice == "linear"
+    assert np.array_equal(signal, before) #the input isn't changed
+    #the drift comes off the WHOLE signal, the artifact and the end included, not just the fit window
+    assert np.allclose(detrended, signal - fit_drifts(signal, FS)[0])
+    window = (t > 3) & (t < t[-1] - 0.5)
+    #the fitted line also soaks up a little of the response, so compare with a small tolerance, inside the window
+    assert np.allclose(detrended[window], without_drift[window], atol=0.005)
+
+
+def test_detrend_channel_takes_off_a_bend():
+    #a bending drift: her rule picks quadratic, and the bend comes off
+    t, signal, without_drift = _detrend_test_signal(lambda t: 0.0004 * (t - 20) ** 2)
+    detrended, choice = detrend_channel(signal, FS, "single", "dbs")
+    assert choice == "quadratic"
+    window = (t > 3) & (t < t[-1] - 0.5)
+    assert np.allclose(detrended[window], without_drift[window], atol=0.005)
+
+
+def test_detrend_channel_leaves_a_signal_without_drift_alone():
+    #artifact and response but no drift: nothing helps enough, so the choice is none and the signal comes back as it
+    #was, as a new array
+    t, signal, _ = _detrend_test_signal(lambda t: 0.0 * t)
+    detrended, choice = detrend_channel(signal, FS, "single", "dbs")
+    assert choice == "none"
+    assert np.array_equal(detrended, signal)
+    assert not np.shares_memory(detrended, signal)
+
+
+def test_detrend_channel_skips_ecog_and_returns_a_copy():
+    #Sarah's code skips ECoG: same values back, choice none, but a new array, so changing it can't change the input
+    t, signal, _ = _detrend_test_signal(lambda t: 0.05 * t)
+    detrended, choice = detrend_channel(signal, FS, "single", "ecog")
+    assert choice == "none"
+    assert np.array_equal(detrended, signal)
+    assert not np.shares_memory(detrended, signal)
+
+
+def test_detrend_channel_passes_the_condition_on(monkeypatch):
+    #the condition must reach choose_detrend (bursts 1-9 use a different rule), not be dropped or replaced
+    from preprocess_dbs import postprocess
+    seen = []
+    def record(scores, condition):
+        seen.append(condition)
+        return "none"
+    monkeypatch.setattr(postprocess, "choose_detrend", record)
+    _, signal, _ = _detrend_test_signal(lambda t: 0.05 * t)
+    detrend_channel(signal, FS, "burst_3", "dbs")
+    assert seen == ["burst_3"]
 

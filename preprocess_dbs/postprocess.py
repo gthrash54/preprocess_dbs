@@ -184,3 +184,31 @@ def choose_detrend(scores,condition):
             return "linear"
         else: #rule 4: neither helps enough
             return "none"
+
+
+def detrend_channel(signal,fs,condition,channel_type):
+    """
+    Detrends one channel the way Sarah does (postprocess.m:583-655): DBS channels get the drift picked by her rule taken
+    off; ECoG channels are left as they are (her code skips them). Any other type is treated like DBS, so the caller has
+    to leave EMG out, as her code does earlier (postprocess.m:548).
+    For DBS this chains the three parts: fit_drifts (a line and a parabola), score_drifts (scores the drift window for
+    each option), choose_detrend (her rule), then subtracts the chosen drift from the whole signal ("none" subtracts
+    nothing).
+    Input:
+    signal: one channel (1-D) from crop_and_demean
+    fs: sampling freq in Hz
+    condition: the condition's name, e.g. "single", "burst_3" (bursts 1-9 use her simpler rule)
+    channel_type: the channel's MNE type as to_mne sets it, "dbs" or "ecog" (her code checks whether the type contains
+        "ecog"; to_mne's types are exact)
+    Returns: the detrended signal (a new array, the input isn't changed) and the choice: "none", "linear" or "quadratic"
+    """
+    if channel_type == "ecog":
+        return signal.copy(), "none" #ECoG skips detrending (a copy, so changing the result can't change the input)
+    else:
+        linear_drift, quadratic_drift, mask = fit_drifts(signal,fs)
+        scores = score_drifts(signal,linear_drift,quadratic_drift,mask)
+        choice = choose_detrend(scores,condition)
+        #the choice word picks the drift to take off
+        chosen_drift = {"none":np.zeros(len(signal)), "linear":linear_drift, "quadratic":quadratic_drift}[choice]
+        detrended_signal = signal - chosen_drift
+        return detrended_signal, choice
