@@ -244,6 +244,14 @@ def moving_mean(x,window):
     return smoothed
 
 
+def _round_half_up(x):
+    """
+    Rounds a positive number like MATLAB's round: halves go up (2.5 -> 3). Python's round sends halves to the even
+    number (2.5 -> 2), which can change a window or guard length at some sampling rates (e.g. LONG at 27.5 kHz).
+    """
+    return int(np.floor(x + 0.5))
+
+
 def _odd_window(seconds,fs):
     """
     Turns a window length in seconds into a whole, odd number of samples, so the window has a middle sample. Same as
@@ -352,7 +360,7 @@ def guard_artifact_onset(states,fs):
     Returns: a new array with the guard applied (the input isn't changed). If there's no ARTIFACT, an unchanged copy.
     """
     states_copy = states.copy() #work on a copy so the caller's array stays the same
-    guard = int(np.floor(0.0002*fs + 0.5)) #0.2 ms: 10 samples at 48.8 kHz (MATLAB-style round, halves go up)
+    guard = _round_half_up(0.0002*fs) #0.2 ms: 10 samples at 48.8 kHz (MATLAB-style rounding, halves go up)
     mask = states == ARTIFACT
     artifact_idx = np.flatnonzero(mask) #positions of every ARTIFACT sample
     if len(artifact_idx) == 0: #no artifact, nothing to guard
@@ -361,3 +369,102 @@ def guard_artifact_onset(states,fs):
     start = max(0,artifact_idx[0] - guard)
     states_copy[start:artifact_idx[0]+1] = SHORT #+1 so the first artifact sample is included, like her n0:n
     return states_copy
+
+
+def state_window(state, activity_value, fs, deartifacted=True):
+    """
+    The Savitzky-Golay window (samples) and polynomial order for one smoothing state, Sarah's postprocess.m:728-772.
+    - LONG (flat stretches): 0.6 ms (29 samples at 48.8 kHz), order 3. Shrinks by up to 30% when activity is high
+      ("if signal suddenly gets sharper, reduce smoothing"); activity_value is the activity at the stretch's first sample,
+      as she sizes each stretch from its first sample (line 767).
+    - SHORT (the response right after the artifact; her comment says R1): 0.3 ms (15 samples), order 2.
+    - ARTIFACT: 0.2 ms (11 samples after making it odd) for de-artifacted data, 0.1 ms (5 samples) otherwise, order 2.
+    Then, like hers, the window is rounded, made odd (Savitzky-Golay needs a middle sample) and made at least order + 2
+    (Sarah's minimum; more points than the fitted curve has coefficients). All rounding is MATLAB's (halves go up), so
+    the windows match hers at any rate; with Python's round, LONG's first rounding would differ at e.g. 27.5 kHz.
+    At our rate the filter keeps more than 99.9% of a 300 Hz wave in the middle of a stretch (cutoffs 1.8-4.8 kHz for
+    the de-artifacted settings, about 11.6 kHz for the 5-sample window), so it mostly removes fuzz above a few kHz;
+    the ends of each stretch can differ a little (see notes_for_walker.md).
+    Input:
+    state: LONG, SHORT or ARTIFACT
+    activity_value: activity (0 to 1) at the stretch's first sample; only LONG uses it
+    fs: sampling freq in Hz
+    deartifacted: True for de-artifacted data (Sarah's longer ARTIFACT window), False for the not-de-artifacted branch
+    Returns: window (a whole number of samples, odd at our rate), order. At very low rates (e.g. 5 kHz) the order + 2
+    minimum can make it even, as in Sarah's code; MATLAB's sgolayfilt would refuse that window, scipy's runs it.
+    Raises ValueError for any other state.
+    """
+    #the starting window and order for each state (her w_long, w_short, w_artifact and p_*)
+    if state == LONG:
+        window = _round_half_up(0.0006*fs)*(1-0.3*activity_value) #29 samples, up to 30% shorter when the signal is sharp
+        order = 3
+    elif state == SHORT:
+        window = _round_half_up(0.0003*fs) #15 samples
+        order = 2
+    elif state == ARTIFACT:
+        if deartifacted==True:
+            window = _round_half_up(0.0002*fs) #10 samples, 11 once made odd
+        else:
+            window = _round_half_up(0.0001*fs) #5 samples
+        order = 2
+    else: #fail loudly: without this, an unknown state would crash below with a confusing "window not defined" error
+        raise ValueError(f"state must be LONG, SHORT or ARTIFACT, got {state!r}")
+    #tidy the window the same way for every state (her lines 767-772)
+    window = _round_half_up(window) #LONG's multiply can leave a decimal
+    if window%2 == 0: #odd, so the window has a middle sample
+        window += 1
+    window = max(window,order+2) #enough points for the fit
+    return window, order
+
+
+def find_stretches(states):
+    """
+    Finds the stretches of the same state, as fenceposts: where each stretch starts, plus the end of the last one
+    (Sarah's change_points, postprocess.m:755). Stretch k is states[fenceposts[k]:fenceposts[k+1]].
+    For example [1, 1, 2, 2, 2, 3, 1] gives [0, 2, 5, 6, 7]: stretches 0-2, 2-5, 5-6 and 6-7.
+    Her version, [1; find(diff(state) ~= 0) + 1; N+1], counts from 1 and ends at N+1; Python's slices stop one short,
+    so 0 and the length do the same job here.
+    Input:
+    states: from smoothing_states (after guard_artifact_onset)
+    Returns: the fenceposts, from 0 to len(states), one more than the number of stretches
+    """
+    mask = np.diff(states) != 0 #True where a sample's state differs from the next one
+    state_change_idx = np.flatnonzero(mask)
+    state_change_idx += 1 #diff position i sits between samples i and i+1, so the new stretch starts at i+1
+    fenceposts = np.concat(([0],state_change_idx,[len(states)])) #add the start of the first and the end of the last
+    return fenceposts
+
+
+def smooth_by_state(signal, states, activity, fs, deartifacted=True):
+    """
+    Smooths each stretch of the same state with its own Savitzky-Golay window and order, Sarah's segment-wise filtering
+    (postprocess.m:757-792).
+    - Each stretch is filtered on its own, so it never sees samples from its neighbors and nothing is blended at the
+      boundaries (her blending code is commented out, lines 781-789; see notes_for_walker.md).
+    - The window and order come from state_window, using the state and activity at the stretch's first sample (her
+      w_use(idx(1)), line 767).
+    - A stretch shorter than its window is left as it is (her lines 773-775). With the default settings that includes
+      the guard stretch before the artifact when it stands alone (11 samples, SHORT window 15).
+    - savgol_filter(..., mode='interp') matches MATLAB's sgolayfilt for odd windows (Codex checked the edges against
+      her documented method: equal to about 1e-14). Note the argument order: scipy takes (x, window, order),
+      MATLAB sgolayfilt(x, order, window).
+    Input:
+    signal: one channel (1-D), the detrended signal
+    states: from smoothing_states, after guard_artifact_onset
+    activity: from smoothing_features (only its value at each stretch's first sample is used)
+    fs: sampling freq in Hz
+    deartifacted: True for de-artifacted data, False for the not-de-artifacted branch (the ARTIFACT window, 11 vs 5)
+    Returns: the smoothed signal, a new array the same length as signal (the input isn't changed)
+    """
+    smoothed = signal.astype(float) #a float copy: skipped stretches keep their raw values, and smoothed values aren't
+                                    #cut to whole numbers if the input happens to be integers
+    fenceposts = find_stretches(states)
+    for k in range(len(fenceposts)-1):
+        start = fenceposts[k]
+        stop = fenceposts[k+1]
+        length = stop-start
+        window, order = state_window(states[start],activity[start],fs=fs, deartifacted=deartifacted)
+        if (length) < window:
+            continue
+        smoothed[start:stop] = savgol_filter(signal[start:stop], window, order, mode='interp')
+    return smoothed

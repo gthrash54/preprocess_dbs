@@ -10,6 +10,9 @@ from preprocess_dbs.postprocess import choose_detrend
 from preprocess_dbs.postprocess import detrend_channel
 from preprocess_dbs.postprocess import smoothing_states
 from preprocess_dbs.postprocess import guard_artifact_onset
+from preprocess_dbs.postprocess import state_window
+from preprocess_dbs.postprocess import find_stretches
+from preprocess_dbs.postprocess import smooth_by_state
 from preprocess_dbs.postprocess import LONG, ARTIFACT, SHORT
 
 FS = 48828.125
@@ -500,3 +503,141 @@ def test_guard_artifact_onset_rounds_halves_up_like_matlab():
     #First ARTIFACT at index 5, so indices 2-5 become SHORT (with Python's round it would be 3-5)
     states = np.array([1, 1, 1, 1, 1, 2, 3])
     assert np.array_equal(guard_artifact_onset(states, 12500), [1, 1, 3, 3, 3, 3, 3])
+
+
+@pytest.mark.parametrize("state, activity_value, deartifacted, expected", [
+    #Sarah's windows at our rate (postprocess.m:728-736), after rounding, making odd and at least order + 2
+    (LONG, 0, True, (29, 3)),       #round(0.6 ms) = 29, already odd
+    (LONG, 1, True, (21, 3)),       #29 x 0.7 = 20.3 -> 20 -> odd 21: the up-to-30% shrink when the signal is sharp
+    (LONG, 0.5, True, (25, 3)),     #29 x 0.85 = 24.65 -> 25
+    (SHORT, 0, True, (15, 2)),      #round(0.3 ms) = 15
+    (SHORT, 1, True, (15, 2)),      #only LONG uses the activity
+    (ARTIFACT, 0, True, (11, 2)),   #round(0.2 ms) = 10 -> odd 11 (de-artifacted data)
+    (ARTIFACT, 0, False, (5, 2)),   #round(0.1 ms) = 5 (the not-de-artifacted branch)
+])
+def test_state_window_at_our_rate(state, activity_value, deartifacted, expected):
+    assert state_window(state, activity_value, FS, deartifacted) == expected
+
+
+def test_state_window_is_at_least_order_plus_2():
+    #at a low rate the windows would be tiny: at 5 kHz, 0.2 ms is 1 sample (odd already), but Sarah requires at least
+    #order + 2 = 4 points, so the window becomes 4. (Sarah's order of steps allows an even window here; it can't happen at
+    #our rate, where the smallest window is 5.)
+    assert state_window(ARTIFACT, 0, 5000) == (4, 2)
+
+
+def test_state_window_refuses_an_unknown_state():
+    with pytest.raises(ValueError, match="LONG, SHORT or ARTIFACT"):
+        state_window(0, 0, FS)
+
+
+@pytest.mark.parametrize("states, expected", [
+    ([1, 1, 2, 2, 2, 3, 1], [0, 2, 5, 6, 7]),   #the docstring example: four stretches, five fenceposts
+    ([1, 1, 1], [0, 3]),                         #no change: one stretch covering everything
+    ([1], [0, 1]),                               #a single sample
+    ([2, 1], [0, 1, 2]),                         #a change right after the first sample
+    ([1, 1, 3], [0, 2, 3]),                      #a change right before the last sample
+])
+def test_find_stretches(states, expected):
+    assert np.array_equal(find_stretches(np.array(states)), expected)
+
+
+def test_find_stretches_each_stretch_is_one_state():
+    #on random states: every stretch holds a single state, and neighboring stretches differ
+    states = np.random.default_rng(2).integers(1, 4, size=300)
+    fenceposts = find_stretches(states)
+    for k in range(len(fenceposts) - 1):
+        stretch = states[fenceposts[k]:fenceposts[k + 1]]
+        assert np.all(stretch == stretch[0])
+        if k > 0:
+            assert states[fenceposts[k]] != states[fenceposts[k] - 1]
+
+
+def _smoothing_test_case():
+    #50 LONG, 12 ARTIFACT, 5 SHORT samples of random data, activity 0 everywhere
+    states = np.array([LONG] * 50 + [ARTIFACT] * 12 + [SHORT] * 5)
+    signal = np.random.default_rng(3).normal(size=len(states))
+    return signal, states, np.zeros(len(states))
+
+
+def test_smooth_by_state_uses_each_stretchs_own_settings():
+    #each stretch must equal savgol_filter on that stretch alone with its state's window and order:
+    #LONG 29/3, ARTIFACT 11/2; the SHORT stretch (5 samples) is shorter than its window (15), so it stays raw
+    from scipy.signal import savgol_filter
+    signal, states, activity = _smoothing_test_case()
+    smoothed = smooth_by_state(signal, states, activity, FS)
+    assert np.allclose(smoothed[:50], savgol_filter(signal[:50], 29, 3, mode="interp"))
+    assert np.allclose(smoothed[50:62], savgol_filter(signal[50:62], 11, 2, mode="interp"))
+    assert np.array_equal(smoothed[62:], signal[62:])
+
+
+def test_smooth_by_state_passes_deartifacted_on():
+    #the not-de-artifacted branch uses the 5-sample ARTIFACT window (a hardcoded deartifacted=True would give 11)
+    from scipy.signal import savgol_filter
+    signal, states, activity = _smoothing_test_case()
+    smoothed = smooth_by_state(signal, states, activity, FS, deartifacted=False)
+    assert np.allclose(smoothed[50:62], savgol_filter(signal[50:62], 5, 2, mode="interp"))
+
+
+def test_smooth_by_state_never_mixes_stretches():
+    #invariance: a huge trap inside the ARTIFACT stretch must not change the smoothed LONG or SHORT stretches,
+    #because each stretch is filtered on its own (no blending)
+    signal, states, activity = _smoothing_test_case()
+    trapped = signal.copy()
+    trapped[50:62] += 1000
+    before = smooth_by_state(signal, states, activity, FS)
+    after = smooth_by_state(trapped, states, activity, FS)
+    assert np.array_equal(before[:50], after[:50])
+    assert np.array_equal(before[62:], after[62:])
+
+
+def test_smooth_by_state_sizes_long_from_the_first_sample():
+    #LONG's window shrinks with the activity at the stretch's FIRST sample only: activity 1 there gives 21 instead of
+    #29, and activity anywhere else in the stretch changes nothing
+    from scipy.signal import savgol_filter
+    signal, states, activity = _smoothing_test_case()
+    first_high = activity.copy()
+    first_high[0] = 1
+    assert np.allclose(smooth_by_state(signal, states, first_high, FS)[:50],
+                       savgol_filter(signal[:50], 21, 3, mode="interp"))
+    rest_high = activity.copy()
+    rest_high[1:50] = 1
+    assert np.array_equal(smooth_by_state(signal, states, rest_high, FS), smooth_by_state(signal, states, activity, FS))
+
+
+def test_smooth_by_state_leaves_the_input_alone():
+    signal, states, activity = _smoothing_test_case()
+    before = signal.copy()
+    smooth_by_state(signal, states, activity, FS)
+    assert np.array_equal(signal, before)
+
+
+def test_smooth_by_state_filters_a_stretch_exactly_as_long_as_its_window():
+    #Sarah skips a stretch only when it's SHORTER than its window (numel(idx) < w): an 11-sample ARTIFACT stretch
+    #(window 11) still gets smoothed. Catches "<=" in place of "<"
+    from scipy.signal import savgol_filter
+    states = np.array([LONG] * 50 + [ARTIFACT] * 11 + [SHORT] * 5)
+    signal = np.random.default_rng(4).normal(size=len(states))
+    smoothed = smooth_by_state(signal, states, np.zeros(len(states)), FS)
+    assert np.allclose(smoothed[50:61], savgol_filter(signal[50:61], 11, 2, mode="interp"))
+
+
+def test_smooth_by_state_full_cycle():
+    #a whole cycle, LONG -> ARTIFACT -> SHORT -> LONG, with a SHORT stretch long enough to be filtered (20 >= 15) and a
+    #second LONG stretch sized from ITS first sample (activity 1 there: window 21), not from sample 0 (activity 0: 29)
+    from scipy.signal import savgol_filter
+    states = np.array([LONG] * 40 + [ARTIFACT] * 12 + [SHORT] * 20 + [LONG] * 40)
+    signal = np.random.default_rng(5).normal(size=len(states))
+    activity = np.zeros(len(states))
+    activity[72] = 1
+    smoothed = smooth_by_state(signal, states, activity, FS)
+    assert np.allclose(smoothed[:40], savgol_filter(signal[:40], 29, 3, mode="interp"))
+    assert np.allclose(smoothed[40:52], savgol_filter(signal[40:52], 11, 2, mode="interp"))
+    assert np.allclose(smoothed[52:72], savgol_filter(signal[52:72], 15, 2, mode="interp"))
+    assert np.allclose(smoothed[72:], savgol_filter(signal[72:], 21, 3, mode="interp"))
+
+
+def test_state_window_rounds_halves_up_like_matlab():
+    #at 27.5 kHz LONG's base window is 16.5 samples. MATLAB rounds it to 17 (then 17 x 0.925 = 15.73 -> 16 -> odd 17);
+    #Python's round would give 16 (-> 14.8 -> 15). Also catches multiplying before the first rounding (15.26 -> 15)
+    assert state_window(LONG, 0.25, 27500) == (17, 3)
