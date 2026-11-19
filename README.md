@@ -17,6 +17,93 @@ pytest -q
 
 Two tests run on uh3021's cleaned increment file and are skipped on a machine that doesn't have it.
 
+## Quick start
+
+This runs without any recordings. It writes a small synthetic file, `demo.h5`, in the current folder, laid out like a clean_dbs output: one 8-contact lead, ten single pulses and ten pairs, and a made-up response on contact 3. Then it loads the file, re-references it, labels the pulses and averages the single pulses. preprocess_dbs only reads clean_dbs's `.h5` files, so clean_dbs doesn't have to be installed.
+
+To use the package without cloning it (the editable install above is for changing the code or running the tests):
+
+```
+pip install git+https://github.com/gthrash54/preprocess_dbs
+```
+
+Save this as `quickstart.py` and run `python quickstart.py`:
+
+```python
+import h5py
+import mne
+import numpy as np
+from preprocess_dbs.to_mne import to_mne
+from preprocess_dbs.pulses import stim_times, classify_pulses
+from preprocess_dbs.rereference import add_virtual_rings, dbs_rereference, erna_pairs
+from preprocess_dbs.epoch import average_segment
+
+mne.set_log_level("WARNING")  # hide MNE's progress messages
+
+# 3 s of noise on one 8-contact lead at 10 kHz, in volts
+fs = 10_000.0
+rng = np.random.default_rng(0)
+data = 2e-6 * rng.standard_normal((8, 30_000))
+
+# stim: 10 single pulses, then 10 pairs 2.89 ms apart, 100 ms between groups
+singles = 0.5 + 0.1 * np.arange(10)
+firsts = 1.5 + 0.1 * np.arange(10)
+times = np.sort(np.r_[singles, firsts, firsts + 0.00289])
+counts = np.where(times < 1.45, 1, 2)            # pulses in each pulse's group
+periods = np.where(times < 1.45, 49.99, 2.89)    # stimulator period, ms
+
+# a made-up 300 Hz response after every pulse, on contact 3 only
+t = np.arange(0, 0.02, 1 / fs)
+response = 20e-6 * np.sin(2 * np.pi * 300 * t) * np.exp(-t / 0.005)
+for p in times:
+    data[2, int(p * fs):int(p * fs) + len(t)] += response
+
+# save it the way clean_dbs lays out a cleaned file
+with h5py.File("demo.h5", "w") as f:
+    g = f.create_group("streams/ecos")
+    g["data"] = data.astype(np.float32)
+    g["channel_names"] = np.array([f"lead1_c{k}" for k in range(1, 9)], dtype="S")
+    g["channel_group"] = np.array(["lead1"] * 8, dtype="S")
+    g["channel_contact"] = np.array([str(k) for k in range(1, 9)], dtype="S")
+    g["channel_dnu"] = np.zeros(8, dtype=np.int8)  # 1 = do not use
+    g.attrs["fs"] = fs
+    g.attrs["dnu_list"] = "demo"
+    s = f.create_group("stim")
+    s["time"], s["count"], s["period_ms"] = times, counts, periods
+    s["voice"] = np.array(["A"] * len(times), dtype="S")
+    s["confirmed"] = np.ones(len(times), dtype=np.int8)
+
+# load, re-reference, label, average
+raw = to_mne("demo.h5", "ecos", 0, 3)  # MNE Raw; pulses are "stim" annotations
+bipolar = dbs_rereference(add_virtual_rings(raw, ["lead1"]), ["lead1"], erna_pairs)
+with h5py.File("demo.h5", "r") as f:
+    s = f["stim"]
+    labels = classify_pulses(s["count"][:], s["period_ms"][:], s["time"][:], voices=s["voice"][:])
+print(sorted(set(labels)))
+
+evoked = average_segment(bipolar, stim_times("demo.h5"), labels)
+single = evoked["single"]
+print(f"single pulse, average of {single.nave}, peak to peak:")
+for name, x in zip(single.ch_names, single.data):
+    print(f"  {name:20s} {np.ptp(x) * 1e6:5.1f} uV")
+```
+
+It prints:
+
+```
+['paired_2.89_1', 'paired_2.89_2', 'single']
+single pulse, average of 10, peak to peak:
+  lead1_c3-lead1_c2     30.9 uV
+  lead1_c4-lead1_c3     31.9 uV
+  lead1_c2-lead1_c4      6.2 uV
+  lead1_c6-lead1_c5      6.2 uV
+  lead1_c7-lead1_c6      5.9 uV
+  lead1_c5-lead1_c7      6.1 uV
+  lead1_c8-lead1_c567    4.8 uV
+```
+
+The made-up response is only on contact 3, so only the two pairs that use contact 3 carry it; the others are averaged noise. Each pair `A-B` is A minus B. `erna_pairs` is the lab's 7-pair set (see the table below), and `lead1_c567` is the virtual ring that `add_virtual_rings` makes from contacts 5, 6 and 7.
+
 ## What's here so far
 
 Import each function from its module, for example `from preprocess_dbs.pulses import classify_pulses`.
