@@ -297,4 +297,67 @@ def smoothing_features(signal,fs):
     envelope = signal_rms/np.max(signal_rms) #0 to 1
     return activity,envelope
 
-    
+#The three smoothing states, adopted from Sarah's STATE, postprocess.m:668-670. Each one gets its own smoothing window:
+#LONG (heavy) for flat stretches, ARTIFACT (very light) for the spike, SHORT (medium) for the ERNA ringing.
+LONG = 1
+ARTIFACT = 2
+SHORT = 3
+
+
+def smoothing_states(activity,envelope):
+    """
+    Labels every sample with a smoothing state, using Sarah's state machine (postprocess.m:694-716). The states follow
+    what happens after each pulse:
+    - LONG -> ARTIFACT when activity is above 0.4 (the spike has started)
+    - ARTIFACT -> SHORT when activity is below 0.2 (the spike is over, the ERNA is ringing)
+    - SHORT -> LONG when envelope is below 0.25, a quarter of its max (the response has faded)
+    Each sample can only move one step, chosen by the state of the sample before it, so the order is always
+    LONG -> ARTIFACT -> SHORT -> LONG. This memory is what tells the flat stretch before the pulse apart from the ERNA
+    after it: both have low activity, but only one comes after an ARTIFACT.
+    Entering ARTIFACT takes 0.4 and leaving it takes 0.2. The gap (hysteresis) keeps a value hovering near one threshold
+    from flipping the state back and forth. Landing exactly on a threshold doesn't switch (strict > and <, like hers).
+    Input:
+    activity, envelope: the two features from smoothing_features (each 0 to 1, the same length)
+    Returns: the states, one whole number per sample (LONG, ARTIFACT or SHORT). The first sample is always LONG, whatever
+    its features say, like Sarah's state(1) = LONG.
+    """
+
+    states = np.zeros(len(activity), dtype=int) #integers that label each smoothing state
+    states[0] = LONG #assumes the waveform starts on the flat stretch before the pulse (its features aren't checked)
+    for n in range(1,len(states)):
+        states[n] = states[n-1] #by default, stay in the same state
+        #only the rule for the state we were in gets checked, so a sample moves at most one step
+        if states[n-1] == LONG and activity[n] > 0.4: #the spike starts
+            states[n] = ARTIFACT
+        elif  states[n-1] == ARTIFACT and activity[n] < 0.2: #the spike is over
+            states[n] = SHORT
+        elif states[n-1] == SHORT and envelope[n] < 0.25: #the response has faded
+            states[n] = LONG
+    return states
+
+
+def guard_artifact_onset(states,fs):
+    """
+    Marks about 0.2 ms before the first artifact as SHORT, as Sarah does (postprocess.m:717-724). It's meant to keep the
+    LONG window just before the spike from reaching into the spike and smearing it. Her comment: "so s-g doesnt detect
+    sudden spike with long w and high p".
+    Only the first ARTIFACT stretch gets a guard (her loop stops at the first one). Like hers, the stretch runs through
+    the first ARTIFACT sample itself, so that sample becomes SHORT too (her n0:n includes both ends).
+    The guard is round(0.2 ms * fs) samples before the artifact: 10 at 48.8 kHz, so 11 samples become SHORT counting
+    the first ARTIFACT sample. It stops at sample 0 if the artifact is closer to the start. The rounding is MATLAB's
+    (halves go up): Python's round sends 2.5 to 2, which would differ from hers at some sampling rates (e.g. 12.5 kHz).
+    Input:
+    states: from smoothing_states
+    fs: sampling freq in Hz
+    Returns: a new array with the guard applied (the input isn't changed). If there's no ARTIFACT, an unchanged copy.
+    """
+    states_copy = states.copy() #work on a copy so the caller's array stays the same
+    guard = int(np.floor(0.0002*fs + 0.5)) #0.2 ms: 10 samples at 48.8 kHz (MATLAB-style round, halves go up)
+    mask = states == ARTIFACT
+    artifact_idx = np.flatnonzero(mask) #positions of every ARTIFACT sample
+    if len(artifact_idx) == 0: #no artifact, nothing to guard
+        return states_copy
+    #count back from the FIRST artifact sample, but not past sample 0 (a negative start would count from the end)
+    start = max(0,artifact_idx[0] - guard)
+    states_copy[start:artifact_idx[0]+1] = SHORT #+1 so the first artifact sample is included, like her n0:n
+    return states_copy

@@ -8,6 +8,9 @@ from preprocess_dbs.postprocess import fit_drifts
 from preprocess_dbs.postprocess import score_drifts
 from preprocess_dbs.postprocess import choose_detrend
 from preprocess_dbs.postprocess import detrend_channel
+from preprocess_dbs.postprocess import smoothing_states
+from preprocess_dbs.postprocess import guard_artifact_onset
+from preprocess_dbs.postprocess import LONG, ARTIFACT, SHORT
 
 FS = 48828.125
 
@@ -417,3 +420,83 @@ def test_smoothing_features_refuses_a_flat_signal():
     for flat in (np.zeros(200), np.full(200, 2.0)):
         with pytest.raises(ValueError, match="flat"):
             smoothing_features(flat, FS)
+
+def test_smoothing_states_basic_path():
+    # it checks the normal path of LONG->ARTIFACT->SHORT -> LONG
+    activity = [0,0.5,0.5,0.1,0.1,0.1]
+    envelope = [1,1,1,1,0.2,0.2]
+    states = smoothing_states(activity,envelope)
+    assert np.array_equal(states,[1,2,2,3,1,1])
+
+def test_guard_artifact_onset_one_sample_artifact():
+    states = np.array([1,1,1,1,2,3,3])
+    fs = 10000
+    expected = [1,1,3,3,3,3,3]
+    assert np.array_equal(guard_artifact_onset(states,fs),expected)
+
+
+@pytest.mark.parametrize("activity, envelope, expected", [
+    #one step per sample: the envelope is already low at index 2, but ARTIFACT has to pass through SHORT first
+    ([0, 0.5, 0.1, 0.1], [1, 0.1, 0.1, 0.1], [1, 2, 3, 1]),
+    #hysteresis: 0.3 is too low to enter ARTIFACT (needs > 0.4)...
+    ([0, 0.3, 0.3], [1, 1, 1], [1, 1, 1]),
+    #...but too high to leave it (needs < 0.2)
+    ([0, 0.5, 0.3, 0.3, 0.1], [1, 1, 1, 1, 1], [1, 2, 2, 2, 3]),
+    #landing exactly on a threshold doesn't switch (strict > and <, like Sarah's)
+    ([0, 0.4], [1, 1], [1, 1]),
+    ([0, 0.5, 0.2], [1, 1, 1], [1, 2, 2]),
+    ([0, 0.5, 0.1, 0.1], [1, 1, 1, 0.25], [1, 2, 3, 3]),
+    #SHORT can't jump straight back to ARTIFACT, even with high activity (only LONG can enter ARTIFACT)
+    ([0, 0.5, 0.1, 0.9], [1, 1, 1, 1], [1, 2, 3, 3]),
+    #a second full cycle works the same as the first
+    ([0, 0.5, 0.1, 0.1, 0.5, 0.1], [1, 1, 1, 0.1, 1, 1], [1, 2, 3, 1, 2, 3]),
+    #the first sample is LONG whatever its features say (Sarah's state(1) = LONG)
+    ([0.9, 0.1], [1, 1], [1, 1]),
+])
+def test_smoothing_states_rules(activity, envelope, expected):
+    states = smoothing_states(np.array(activity), np.array(envelope))
+    assert np.array_equal(states, expected)
+
+
+@pytest.mark.parametrize("states, expected", [
+    #basic: the 2 samples before the first ARTIFACT sample, and that sample itself, become SHORT
+    ([1, 1, 1, 1, 2, 2, 3], [1, 1, 3, 3, 3, 2, 3]),
+    #near the start: the guard would run off the front, so it stops at sample 0. Without max(0, ...), start = -1 and
+    #the slice [-1:2] is empty (a negative index counts from the end), so nothing would change and nothing would crash
+    ([1, 2, 2, 3], [3, 3, 2, 3]),
+    #no ARTIFACT anywhere: nothing changes
+    ([1, 1, 3, 1], [1, 1, 3, 1]),
+    #two artifact stretches: only the first one gets a guard
+    ([1, 1, 1, 2, 3, 1, 1, 2, 3], [1, 3, 3, 3, 3, 1, 1, 2, 3]),
+])
+def test_guard_artifact_onset_cases(states, expected):
+    #fs = 10000 makes the guard round(0.2 ms * 10000) = 2 samples
+    assert np.array_equal(guard_artifact_onset(np.array(states), 10000), expected)
+
+
+def test_guard_artifact_onset_is_0_2_ms_at_our_rate():
+    #at 48828.125 Hz the guard is round(9.766) = 10 samples: with the first ARTIFACT sample at 20, samples 10-20 become
+    #SHORT and sample 9 stays LONG
+    states = np.full(40, LONG)
+    states[20:25] = ARTIFACT
+    states[25:] = SHORT
+    expected = states.copy()
+    expected[10:21] = SHORT
+    assert np.array_equal(guard_artifact_onset(states, FS), expected)
+
+
+def test_guard_artifact_onset_leaves_the_input_alone():
+    states = np.array([1, 1, 1, 1, 2, 2, 3])
+    before = states.copy()
+    guard_artifact_onset(states, 10000)
+    assert np.array_equal(states, before)
+    #and a new array even when there's nothing to guard, so changing the result can't change the caller's states
+    no_artifact = np.array([1, 1, 3, 1])
+    assert not np.shares_memory(guard_artifact_onset(no_artifact, 10000), no_artifact)
+
+
+def test_guard_artifact_onset_rounds_halves_up_like_matlab():
+    #at 12.5 kHz the guard is 2.5 samples: MATLAB's round gives 3, Python's round would give 2 (halves go to even).
+    #First ARTIFACT at index 5, so indices 2-5 become SHORT (with Python's round it would be 3-5)
+    states = np.array([1, 1, 1, 1, 1, 2, 3])
+    assert np.array_equal(guard_artifact_onset(states, 12500), [1, 1, 3, 3, 3, 3, 3])
