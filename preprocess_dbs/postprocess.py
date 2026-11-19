@@ -468,3 +468,40 @@ def smooth_by_state(signal, states, activity, fs, deartifacted=True):
             continue
         smoothed[start:stop] = savgol_filter(signal[start:stop], window, order, mode='interp')
     return smoothed
+
+
+def subtract_median_baseline(signal, fs):
+    """
+    Subtracts the median from about 3 ms after the trimmed start to the end, Sarah's last post-processing step
+    (postprocess.m:802-804, "subtract erna-era median").
+    Her start is round(3 ms * fs) = 146 counted from 1 at 48.8 kHz, so sample 145 here (2.97 ms from the trimmed
+    start). The trimmed start is 2 ms before the artifact peak (sample 98), so this window begins about 1 ms after the
+    artifact and includes the response from there on (Q6 in notes_for_walker.md). Copied as her code runs.
+    Input:
+    signal: one channel (1-D), from smooth_by_state
+    fs: sampling freq in Hz
+    Returns: the signal minus that median, a new array (the input isn't changed)
+    """
+    start = _round_half_up(0.003*fs)-1 #her round(3 ms * fs) counts from 1; Python counts from 0
+    median = np.median(signal[start:]) #from about 1 ms after the artifact to the end
+    demedianed_signal = signal-median #subtracted from the whole signal; makes a new array
+    return demedianed_signal
+
+
+def adaptive_smooth(signal, fs, deartifacted=True):
+    """
+    Sarah's adaptive Savitzky-Golay smoothing for one channel (postprocess.m:663-792), chaining the four pieces in her
+    order: the features (activity, envelope), the states, the guard before the artifact, then each stretch smoothed with
+    its state's window. Every piece is tested on its own; this only wires them together.
+    The median baseline (subtract_median_baseline) is a separate step that comes after.
+    Input:
+    signal: one channel (1-D), from detrend_channel
+    fs: sampling freq in Hz
+    deartifacted: True for de-artifacted data, False for the not-de-artifacted branch (the ARTIFACT window)
+    Returns: the smoothed signal, a new array (the input isn't changed)
+    """
+    activity, envelope = smoothing_features(signal,fs) #how fast it changes, and how big it is
+    states = smoothing_states(activity,envelope) #LONG, ARTIFACT or SHORT for every sample
+    guarded_states = guard_artifact_onset(states,fs) #SHORT for 0.2 ms before the first artifact, and its first sample
+    smoothed = smooth_by_state(signal, guarded_states, activity, fs, deartifacted=deartifacted)
+    return smoothed

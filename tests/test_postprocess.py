@@ -13,6 +13,8 @@ from preprocess_dbs.postprocess import guard_artifact_onset
 from preprocess_dbs.postprocess import state_window
 from preprocess_dbs.postprocess import find_stretches
 from preprocess_dbs.postprocess import smooth_by_state
+from preprocess_dbs.postprocess import subtract_median_baseline
+from preprocess_dbs.postprocess import adaptive_smooth
 from preprocess_dbs.postprocess import LONG, ARTIFACT, SHORT
 
 FS = 48828.125
@@ -641,3 +643,83 @@ def test_state_window_rounds_halves_up_like_matlab():
     #at 27.5 kHz LONG's base window is 16.5 samples. MATLAB rounds it to 17 (then 17 x 0.925 = 15.73 -> 16 -> odd 17);
     #Python's round would give 16 (-> 14.8 -> 15). Also catches multiplying before the first rounding (15.26 -> 15)
     assert state_window(LONG, 0.25, 27500) == (17, 3)
+
+
+def test_subtract_median_baseline_starts_at_sample_145():
+    #index-valued data: each sample's value is its own index, so the median reveals the start. With 300 samples the
+    #median of samples 145-299 is (145 + 299) / 2 = 222; starting at 146 would give 222.5, at 144 221.5
+    signal = np.arange(300.0)
+    result = subtract_median_baseline(signal, FS)
+    assert result[222] == 0
+    assert np.allclose(signal - result, 222)
+
+
+def test_subtract_median_baseline_zeroes_the_late_median():
+    #on random data the result's median from sample 145 on is 0, and only a constant is subtracted
+    signal = np.random.default_rng(6).normal(size=2295) + 5
+    result = subtract_median_baseline(signal, FS)
+    assert np.median(result[145:]) == pytest.approx(0, abs=1e-12)
+    assert np.allclose(np.diff(signal - result), 0)
+
+
+def test_subtract_median_baseline_leaves_the_input_alone():
+    signal = np.random.default_rng(7).normal(size=500)
+    before = signal.copy()
+    result = subtract_median_baseline(signal, FS)
+    assert np.array_equal(signal, before)
+    assert not np.shares_memory(result, signal)
+
+
+def _erna_like_signal():
+    #an artifact at 2 ms, a 300 Hz ringing that dies out, and a little noise
+    t = np.arange(2295) / FS
+    ring = 2e-4 * np.sin(2 * np.pi * 300 * t) * np.exp(-np.clip(t - 0.002, 0, None) / 0.01) * (t > 0.0025)
+    noise = 1e-5 * np.random.default_rng(8).normal(size=t.size)
+    return 5e-3 * np.exp(-((t - 0.002) / 0.00005) ** 2) + ring + noise
+
+
+def test_adaptive_smooth_chains_the_pieces_in_order():
+    #the wrapper must equal the four pieces run by hand, in Sarah's order, for both branches
+    signal = _erna_like_signal()
+    activity, envelope = smoothing_features(signal, FS)
+    states = guard_artifact_onset(smoothing_states(activity, envelope), FS)
+    for deartifacted in (True, False):
+        by_hand = smooth_by_state(signal, states, activity, FS, deartifacted=deartifacted)
+        assert np.array_equal(adaptive_smooth(signal, FS, deartifacted=deartifacted), by_hand)
+
+
+def test_adaptive_smooth_removes_noise_and_leaves_the_input_alone():
+    #the late stretch is LONG (window 29), so sample-to-sample noise there drops a lot; the input isn't changed
+    signal = _erna_like_signal()
+    before = signal.copy()
+    smoothed = adaptive_smooth(signal, FS)
+    assert np.std(np.diff(smoothed[1500:])) < 0.2 * np.std(np.diff(signal[1500:]))
+    assert np.array_equal(signal, before)
+    assert len(smoothed) == len(signal)
+
+
+def test_subtract_median_baseline_at_another_rate():
+    #at 1.5 kHz, 3 ms is 4.5 samples: MATLAB rounds it to 5 (counted from 1), so the window starts at index 4. Index-valued
+    #data: the median of 4..20 is 12. Python's round (4 -> index 3) would give 11.5, and a hardcoded 145 would fail
+    signal = np.arange(21.0)
+    assert np.allclose(signal - subtract_median_baseline(signal, 1500), 12)
+
+
+def test_adaptive_smooth_passes_the_right_arrays_on(monkeypatch):
+    #spy on the last step: it must get the original signal, the GUARDED states and the ACTIVITY (not the envelope), and
+    #the deartifacted flag, which defaults to True. (Swapping in the envelope gave identical output on the ERNA-like
+    #signal, so only a spy catches it.)
+    from preprocess_dbs import postprocess
+    seen = {}
+    def record(signal, states, activity, fs, deartifacted=True):
+        seen.update(signal=signal, states=states, activity=activity, fs=fs, deartifacted=deartifacted)
+        return signal.copy()
+    monkeypatch.setattr(postprocess, "smooth_by_state", record)
+    signal = _erna_like_signal()
+    activity, envelope = smoothing_features(signal, FS)
+    guarded = guard_artifact_onset(smoothing_states(activity, envelope), FS)
+    postprocess.adaptive_smooth(signal, FS)
+    assert seen["signal"] is signal
+    assert np.array_equal(seen["states"], guarded)
+    assert np.array_equal(seen["activity"], activity) and not np.array_equal(seen["activity"], envelope)
+    assert seen["fs"] == FS and seen["deartifacted"] is True
