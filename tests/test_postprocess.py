@@ -15,6 +15,8 @@ from preprocess_dbs.postprocess import find_stretches
 from preprocess_dbs.postprocess import smooth_by_state
 from preprocess_dbs.postprocess import subtract_median_baseline
 from preprocess_dbs.postprocess import adaptive_smooth
+from preprocess_dbs.postprocess import postprocess_channel
+from preprocess_dbs.postprocess import postprocess_condition
 from preprocess_dbs.postprocess import LONG, ARTIFACT, SHORT
 
 FS = 48828.125
@@ -723,3 +725,85 @@ def test_adaptive_smooth_passes_the_right_arrays_on(monkeypatch):
     assert np.array_equal(seen["states"], guarded)
     assert np.array_equal(seen["activity"], activity) and not np.array_equal(seen["activity"], envelope)
     assert seen["fs"] == FS and seen["deartifacted"] is True
+
+
+def _condition_test_data():
+    #three channels (DBS, DBS, ECoG) of 2600 samples, the stim at 2 ms. Each has an artifact at epoch sample 97 + its
+    #peak position, a 300 Hz ring after it, a slow drift and a little noise, so every post-processing step has work
+    t = np.arange(2600) / FS
+    peaks = np.array([21.0, 22.4, 20.6])
+    rng = np.random.default_rng(9)
+    rows = []
+    for i, peak in enumerate(peaks):
+        at = (97 + peak) / FS
+        artifact = 5e-3 * np.exp(-((t - at) / 0.00005) ** 2)
+        ring = 2e-4 * np.sin(2 * np.pi * 300 * (t - at)) * np.exp(-np.clip(t - at, 0, None) / 0.01) * (t > at + 0.0005)
+        drift = (i + 1) * 1e-4 * t / t[-1]
+        rows.append(artifact + ring + drift + 1e-5 * rng.normal(size=t.size))
+    return np.vstack(rows), peaks, ["dbs", "dbs", "ecog"]
+
+
+def test_postprocess_channel_chains_the_three_steps():
+    #a DBS channel equals detrend -> adaptive smoothing -> median baseline run by hand, and returns the detrend choice
+    data, peaks, types = _condition_test_data()
+    cropped = crop_and_demean(trim_to_artifact(data, peaks, FS), FS)
+    detrended, choice = detrend_channel(cropped[0], FS, "single", "dbs")
+    by_hand = subtract_median_baseline(adaptive_smooth(detrended, FS), FS)
+    finished, returned_choice = postprocess_channel(cropped[0], FS, "single", "dbs")
+    assert np.array_equal(finished, by_hand)
+    assert returned_choice == choice
+
+
+def test_postprocess_channel_skips_the_detrend_for_ecog():
+    #ECoG: no detrend (choice "none"), but it is still smoothed and baselined
+    data, peaks, types = _condition_test_data()
+    cropped = crop_and_demean(trim_to_artifact(data, peaks, FS), FS)
+    finished, choice = postprocess_channel(cropped[2], FS, "single", "ecog")
+    assert choice == "none"
+    assert np.array_equal(finished, subtract_median_baseline(adaptive_smooth(cropped[2], FS), FS))
+
+
+def test_postprocess_condition_runs_every_channel():
+    #the whole condition equals trim -> crop/demean -> postprocess_channel on each row, in row order, with each row's
+    #own type; the output is 2295 samples (45 ms after the peak plus 2 ms before) and the input isn't changed
+    data, peaks, types = _condition_test_data()
+    before = data.copy()
+    finished, choices = postprocess_condition(data, peaks, FS, "single", types)
+    cropped = crop_and_demean(trim_to_artifact(data, peaks, FS), FS)
+    assert finished.shape == (3, 2295)
+    for ch in range(3):
+        row, choice = postprocess_channel(cropped[ch], FS, "single", types[ch])
+        assert np.array_equal(finished[ch], row)
+        assert choices[ch] == choice
+    assert choices[2] == "none"
+    assert choices[0] != "none" and choices[1] != "none"  #the DBS drift really gets detrended
+    assert np.array_equal(data, before)
+
+
+def test_postprocess_condition_passes_everything_on(monkeypatch):
+    #spy: every row reaches the smoothing with its own condition, type and the deartifacted flag (a hardcoded "single",
+    #a fixed type or a dropped flag inside either wrapper would show up here)
+    from preprocess_dbs import postprocess
+    seen = []
+    real_detrend, real_smooth = postprocess.detrend_channel, postprocess.adaptive_smooth
+    def spy_detrend(signal, fs, condition, channel_type):
+        seen.append(("detrend", condition, channel_type))
+        return real_detrend(signal, fs, condition, channel_type)
+    def spy_smooth(signal, fs, deartifacted=True):
+        seen.append(("smooth", deartifacted))
+        return real_smooth(signal, fs, deartifacted=deartifacted)
+    monkeypatch.setattr(postprocess, "detrend_channel", spy_detrend)
+    monkeypatch.setattr(postprocess, "adaptive_smooth", spy_smooth)
+    data, peaks, types = _condition_test_data()
+    postprocess.postprocess_condition(data, peaks, FS, "burst_3", types, deartifacted=False)
+    assert seen == [("detrend", "burst_3", "dbs"), ("smooth", False),
+                    ("detrend", "burst_3", "dbs"), ("smooth", False),
+                    ("detrend", "burst_3", "ecog"), ("smooth", False)]
+
+
+def test_postprocess_condition_refuses_a_type_count_mismatch():
+    #one type per row: too few would fail midway, too many would go unnoticed
+    data, peaks, types = _condition_test_data()
+    for wrong in (types[:2], types + ["dbs"]):
+        with pytest.raises(ValueError, match="3 channels"):
+            postprocess_condition(data, peaks, FS, "single", wrong)

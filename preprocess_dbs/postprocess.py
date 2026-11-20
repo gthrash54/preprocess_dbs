@@ -505,3 +505,58 @@ def adaptive_smooth(signal, fs, deartifacted=True):
     guarded_states = guard_artifact_onset(states,fs) #SHORT for 0.2 ms before the first artifact, and its first sample
     smoothed = smooth_by_state(signal, guarded_states, activity, fs, deartifacted=deartifacted)
     return smoothed
+
+
+def postprocess_channel(signal, fs, condition, channel_type, deartifacted=True):
+    """
+    The per-channel steps of Sarah's post-processing for one cropped, demeaned channel (postprocess.m:583-806):
+    detrend (DBS only, her choice rule), adaptive Savitzky-Golay smoothing, then the median baseline.
+    Input:
+    signal: one channel (1-D) from crop_and_demean
+    fs: sampling freq in Hz
+    condition: the condition's name, e.g. "single", "burst_3" (bursts 1-9 use her simpler detrend rule)
+    channel_type: "dbs" or "ecog" (ECoG skips the detrend, as hers does)
+    deartifacted: True for de-artifacted data, False for the not-de-artifacted branch (the ARTIFACT window)
+    Returns: the finished signal (a new array) and the detrend choice ("none", "linear" or "quadratic"). The choice is
+    kept so it can be compared across conditions later (Q2 in notes_for_walker.md).
+    """
+    detrended, choice = detrend_channel(signal, fs, condition, channel_type) #ECoG comes back unchanged, "none"
+    smoothed = adaptive_smooth(detrended, fs, deartifacted=deartifacted)
+    finished = subtract_median_baseline(smoothed, fs)
+    return finished, choice
+
+
+def postprocess_condition(data, peaks, fs, condition, channel_types, deartifacted=True):
+    """
+    Sarah's per-condition post-processing for the DBS and ECoG rows of one condition's cleaned average
+    (postprocess.m:399-806): trim every channel to 2 ms before its artifact peak, crop to 45 ms after it and demean,
+    then for each channel detrend, smooth and subtract the median baseline (postprocess_channel).
+    Not included here (callers or later steps handle them): EMG (pass DBS and ECoG rows only; an EMG row raises in
+    detrend_channel), the rest data and its filtering, preparing not-de-artifacted pairs (Sarah subtracts the single
+    and slices to the test pulse first, postprocess.m:312-357), time axes and saving.
+    Input:
+    data: one condition's average, channels x time (the stim at 2 ms), all rows at the same sampling rate, e.g.
+        deartifact_segment's cleaned[condition].data
+    peaks: one artifact peak per channel, positions in Sarah's alignment window. For de-artifacted data pass the SINGLE
+        pulse's peaks for every condition (one trim reference per channel, see trim_to_artifact); the
+        not-de-artifacted branch keeps its own unmoved peaks
+    fs: sampling freq in Hz
+    condition: the condition's name, e.g. "single", "burst_3"
+    channel_types: "dbs" or "ecog" for each row of data, in the same order
+    deartifacted: True for de-artifacted data, False for the not-de-artifacted branch
+    Returns: the finished data (channels x up to 2295 samples at 48.8 kHz, the rounded artifact peak at sample 98 =
+    time 0; shorter if the input is shorter) and the detrend choice for each channel, in row order
+    Raises ValueError if channel_types doesn't have one entry per row. That checks the count only; the caller has to
+    keep the types in the same order as the rows.
+    """
+    #fail loudly: one type per row (a short list would otherwise fail midway, a long one would go unnoticed)
+    if len(channel_types) != data.shape[0]:
+        raise ValueError(f"{len(channel_types)} channel types for {data.shape[0]} channels")
+    trimmed = trim_to_artifact(data, peaks, fs) #all channels at once: each starts 2 ms before its artifact peak
+    cropped = crop_and_demean(trimmed, fs) #all channels at once: 45 ms after the peak, demeaned
+    finished = np.zeros_like(cropped)
+    choices = []
+    for ch in range(cropped.shape[0]): #then one channel at a time
+        finished[ch], choice = postprocess_channel(cropped[ch], fs, condition, channel_types[ch], deartifacted)
+        choices.append(choice)
+    return finished, choices
